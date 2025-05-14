@@ -57,4 +57,9 @@ warn_return_any = true
 warn_unused_configs = true
 namespace_packages = true
 explicit_package_bases = true
-strict = true 
+strict = true
+
+[tool.pytest.ini_options]
+markers = [
+    "performance: marks tests as performance tests (deselect with -m 'not performance')"
+] 
