@@ -2,7 +2,7 @@ import pyglet
 from typing import Tuple
 from pyglet import math # Import pyglet.math
 
-DEFAULT_ZOOM_LEVELS = [0.5, 1.0, 2.0]
+DEFAULT_ZOOM_LEVELS = [0.125, 0.25, 0.5, 1.0, 2.0]
 DEFAULT_PAN_SPEED = 200.0  # Pixels per second at zoom 1.0
 
 class Camera:
@@ -46,12 +46,10 @@ class Camera:
             dy: Change in y-direction (e.g., -1 for down, 1 for up).
             dt: Delta time since the last frame, for frame-rate independent speed.
         """
-        # Adjust pan speed by current zoom level: faster pan when zoomed out?
-        # Or constant screen-space pan speed? For now, constant world units per second.
-        effective_speed = self.pan_speed # / self.zoom # if speed should be world-units based
+        effective_speed = self.pan_speed
         self.x += dx * effective_speed * dt
         self.y += dy * effective_speed * dt
-        # print(f"Panned to: ({self.x:.2f}, {self.y:.2f})")
+        print(f"Camera Panned to: ({self.x:.2f}, {self.y:.2f}), Zoom: {self.zoom:.2f}, DeltaTime: {dt:.4f}")
 
     def zoom_in(self) -> None:
         """Zooms in to the next level if available."""

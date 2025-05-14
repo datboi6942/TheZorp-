@@ -1,10 +1,13 @@
 import pyglet
-import esper # esper module is now the world context
+import esper
 import time
-from typing import List, Tuple, Type # Added Type for SystemClass
+from typing import List, Tuple, Type, Optional
+import numpy as np
 
 from zorplife.core.systems import System, RenderSystem, InputSystem # Import InputSystem
 from zorplife.ui.camera import Camera # Import Camera
+from zorplife.world.mapgen import MapGenerator # Import MapGenerator
+from zorplife.world.tiles import Tile # For type hint
 
 TARGET_FPS = 60.0
 TARGET_SPF = 1.0 / TARGET_FPS  # Seconds per frame
@@ -25,8 +28,20 @@ class Engine:
         self._running = False
         self._last_tick_time = time.perf_counter()
 
-        # Initialize Camera first as other systems might need it
-        self.camera = Camera(window=self.window, x=0.0, y=0.0) # Centered view for now
+        # Initialize Map Generator and generate the map
+        # For now, use default size and a fixed seed for consistent testing
+        self.map_generator = MapGenerator(width=100, height=100, seed=42)
+        self.map_generator.generate_map()
+        self.map_data: Optional[np.ndarray[Tile]] = self.map_generator.get_map_data_for_rendering()
+        self.tile_render_size = 32 # pixels, should match sprite atlas if using sprites
+
+        # Center camera on the map initially
+        map_center_x = (self.map_generator.width * self.tile_render_size) / 2.0
+        map_center_y = (self.map_generator.height * self.tile_render_size) / 2.0
+        # Adjust for the fact that tile coords are bottom-left, and camera x,y is center of view
+        # So, if tile (0,0) is at world (0,0), its center is at (size/2, size/2)
+        # If map is 100 tiles (3200px), center is 1600. Camera at (1600,1600) will center this point.
+        self.camera = Camera(window=self.window, x=map_center_x, y=map_center_y)
 
         # System priorities (lower number = higher priority, processed first)
         # This is a conceptual guide; esper processes in order of addition by default,
@@ -35,7 +50,7 @@ class Engine:
             # (SystemClass, priority, init_args_tuple)
             (InputSystem, 0, (self.window, self.camera)),
             # (LogicSystem, 10, (self.camera,)), # Example, if logic needs camera
-            (RenderSystem, 100, (self.window, self.camera)), # Pass camera to RenderSystem
+            (RenderSystem, 100, (self.window, self.camera, self.map_data, self.tile_render_size)), # Pass map_data & tile_size
             # Add other systems here, e.g.:
             # (PhysicsSystem, 10, ()),
             # (AISystem, 20, ()),
@@ -95,10 +110,22 @@ class Engine:
 
         print("Starting engine loop...")
         self._running = True
-        self._last_tick_time = time.perf_counter() # Reset tick time before loop
+        self._last_tick_time = time.perf_counter()
 
-        pyglet.app.event_loop.has_exit = False # Ensure pyglet loop doesn't exit prematurely
+        pyglet.app.event_loop.has_exit = False
 
+        # DEBUG: Check registered processors just before the loop starts effectively
+        print("--- Registered Esper Processors (before first process call) ---")
+        if hasattr(esper, '_processors') and esper._processors:
+            for p_instance in esper._processors:
+                print(f"  - Processor: {type(p_instance).__name__}, Instance: {p_instance}")
+                if hasattr(p_instance, 'process'):
+                    print(f"    Process method signature: {p_instance.process.__code__.co_varnames}")
+        else:
+            print("  - No processors found in esper._processors or _processors not accessible.")
+        print("-------------------------------------------------------------")
+
+        first_loop_iteration = True
         while self._running and not self.window.has_exit:
             current_time = time.perf_counter()
             dt = current_time - self._last_tick_time
@@ -113,6 +140,10 @@ class Engine:
 
             # 2. ECS Tick (Logic Delta)
             # Pass delta_time (dt) to all systems' process methods
+            if first_loop_iteration:
+                print(f"Engine: About to call esper.process({dt=})")
+                first_loop_iteration = False
+            
             esper.process(dt) # Use module-level function, pass dt
             
             # 3. Render Delta (Handled by RenderSystem's process method called above)
