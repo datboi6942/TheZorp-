@@ -1,0 +1,60 @@
+[tool.poetry]
+name = "zorplife"
+version = "0.1.0"
+description = "An emergent behavior simulation with LLM-backed agents."
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "zorplife"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pyglet = "^2.0" # For graphics
+esper = "^3.0" # ECS library, updated from ^1.9
+faiss-cpu = "^1.7" # For vector similarity search (cultural cache, memory)
+sqlite-utils = "^3.36" # For SQLite database interaction
+aiohttp = "^3.9" # For async HTTP requests (Ollama)
+numpy = "^1.26" # For numerical operations, often with pyglet or faiss
+# Choose one audio library:
+# pyo = "^1.0" # For procedural audio
+pygame = "^2.5" # Alternative for audio, simpler if pyo is problematic
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0"
+pytest-cov = "^4.0"
+mypy = "^1.0"
+ruff = "^0.1.0" # Or latest
+black = "^23.0" # Or latest
+ollama = "^0.1.7" # Python client for Ollama
+
+[tool.poetry.scripts]
+zorplife = "zorplife.__main__:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 88
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+]
+ignore = [
+    "E501", # Line too long, handled by black
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+namespace_packages = true
+explicit_package_bases = true
+strict = true 
