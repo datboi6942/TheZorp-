@@ -51,8 +51,8 @@ class Tile(Enum):
     Each enum member holds TileMetadata.
     """
     # Biome/Terrain Tiles
-    GRASSLAND = TileMetadata(name="Grassland", char=".", base_color=(100, 200, 50, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=5.0)
-    FOREST_FLOOR = TileMetadata(name="Forest Floor", char=":", base_color=(50, 150, 20, 255), resource_type=ResourceType.PLANT_MATTER)
+    GRASSLAND = TileMetadata(name="Grassland", char=".", base_color=(100, 200, 50, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=8.0)
+    FOREST_FLOOR = TileMetadata(name="Forest Floor", char=":", base_color=(50, 150, 20, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=5.0)
     WATER_SHALLOW = TileMetadata(name="Shallow Water", char="~", base_color=(50, 100, 200, 150), passable=False, resource_type=ResourceType.WATER)
     WATER_DEEP = TileMetadata(name="Deep Water", char="≈", base_color=(30, 70, 180, 255), passable=False, resource_type=ResourceType.WATER)
     CLIFF_ROCK = TileMetadata(name="Cliff Rock", char="#", base_color=(100, 100, 100, 255), passable=False, resource_type=ResourceType.STONE)
@@ -95,7 +95,7 @@ class Tile(Enum):
     )
 
     # Special / Agent-related
-    ORGANIC_REMAINS = TileMetadata(name="Organic Remains", char="X", base_color=(101, 67, 33, 255), passable=True, resource_type=ResourceType.ORGANIC_MATTER)
+    ORGANIC_REMAINS = TileMetadata(name="Organic Remains", char="X", base_color=(101, 67, 33, 255), passable=True, resource_type=ResourceType.ORGANIC_MATTER, energy_value=8.0)
 
     # Fallback/Empty
     VOID = TileMetadata(name="Void", char=" ", base_color=(0, 0, 0, 255), passable=False)

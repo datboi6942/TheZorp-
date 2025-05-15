@@ -35,7 +35,7 @@ FOREST_HEAVY_MOISTURE = 0.25  # Adjusted (max_moist ~ 0.42)
 TREE_SPAWN_THRESHOLD = 0.1
 ROCK_OUTCROP_SPAWN_THRESHOLD = 0.4
 APPLE_TREE_SPAWN_THRESHOLD = 0.3
-MUSHROOM_SPAWN_THRESHOLD = 0.4
+MUSHROOM_SPAWN_THRESHOLD = 0.1
 IRON_DEPOSIT_SPAWN_THRESHOLD = 0.2
 GOLD_DEPOSIT_SPAWN_THRESHOLD = 0.15 # Increased to make gold less abundant
 
@@ -285,14 +285,38 @@ class MapGenerator:
                         self.resource_counts[ResourceType.APPLES] = self.resource_counts.get(ResourceType.APPLES, 0) + 1
 
                 # Try to place Mushroom Patches on FOREST_FLOOR or FOREST_HEAVY
-                elif (current_tile == Tile.FOREST_FLOOR or current_tile == Tile.FOREST_HEAVY) and mushroom_noise_map[y][x] > MUSHROOM_SPAWN_THRESHOLD:
-                    decrement_counts(current_tile, original_resource)
+                # Ensure the current tile is still FOREST_FLOOR or FOREST_HEAVY 
+                # (i.e., it wasn't just turned into a tree trunk by a preceding rule in this iteration)
+                current_tile_for_mushroom_check = self.tile_grid_np[y][x] # Re-fetch, as it might have been changed by tree/apple tree placement
+                if (current_tile_for_mushroom_check == Tile.FOREST_FLOOR or \
+                    current_tile_for_mushroom_check == Tile.FOREST_HEAVY) and \
+                   mushroom_noise_map[y][x] > MUSHROOM_SPAWN_THRESHOLD:
+                    
+                    original_resource_for_mushroom = current_tile_for_mushroom_check.metadata.resource_type
+                    decrement_counts(current_tile_for_mushroom_check, original_resource_for_mushroom)
                     
                     self.tile_grid_np[y][x] = Tile.MUSHROOM_PATCH
                     self.biome_counts[Tile.MUSHROOM_PATCH] = self.biome_counts.get(Tile.MUSHROOM_PATCH, 0) + 1
                     self.resource_counts[ResourceType.MUSHROOMS] = self.resource_counts.get(ResourceType.MUSHROOMS, 0) + 1
 
                 # Try to place Rock Outcrops on GRASSLAND or MOUNTAIN_SLOPE (less rocky parts)
+                # This should still be an elif, as a tile can't be both a mushroom patch and a rock outcrop simultaneously
+                # if it was converted to mushroom patch in the lines above.
+                # However, the original logic was:
+                # elif (current_tile == Tile.GRASSLAND or current_tile == Tile.MOUNTAIN_SLOPE) ...
+                # We need to ensure this elif condition correctly uses the potentially updated tile type if a mushroom was placed.
+                # OR, more simply, these distinct features (rock, iron, gold) should be checked against the *original* tile type *before* trees/mushrooms,
+                # or their placement should be mutually exclusive by design.
+                # For now, let's assume the original `current_tile` (from start of loop iteration) is intended for these.
+                # This means the structure becomes:
+                # if tree: ...
+                # elif apple_tree: ...
+                #
+                # (independent)
+                # current_tile_for_mushroom_check = self.tile_grid_np[y][x]
+                # if mushroom_on_original_forest_base: ...
+                #
+                # (back to original logic, checking the tile state *before* any tree/mushroom placement for this iteration)
                 elif (current_tile == Tile.GRASSLAND or current_tile == Tile.MOUNTAIN_SLOPE) and rock_outcrop_noise_map[y][x] > ROCK_OUTCROP_SPAWN_THRESHOLD:
                     decrement_counts(current_tile, original_resource)
 
@@ -321,8 +345,8 @@ class MapGenerator:
                         self.resource_counts[ResourceType.GOLD_ORE] = self.resource_counts.get(ResourceType.GOLD_ORE, 0) + 1
 
         print("Map generation complete.")
-        # print("Biome counts:", {k.name: v for k,v in self.biome_counts.items()})
-        # print("Resource counts:", {k.name: v for k,v in self.resource_counts.items()})
+        print("Biome counts:", {k.name: v for k,v in self.biome_counts.items()})
+        print("Resource counts:", {k.name: v for k,v in self.resource_counts.items()})
 
 
     def get_tile_at(self, x: int, y: int) -> Tile:

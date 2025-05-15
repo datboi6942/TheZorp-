@@ -145,7 +145,7 @@ class Engine:
             return
 
         # Update ZorpWorld
-        self.world.tick()
+        self.world.tick(dt)
 
         # Process inputs to update camera state
         if self.input_system:
@@ -254,7 +254,9 @@ class Engine:
             # Debug: Print spawn info
             tile_enum = self.map_generator.tile_grid_np[tile_y][tile_x]
             resource_type = tile_enum.metadata.resource_type
-            print(f"DEBUG: Spawned Zorp {new_zorp.id} at {new_zorp.position} on tile {tile_enum.name} (resource: {resource_type}) with E: {new_zorp.energy:.1f} Alive: {new_zorp.alive}")
+            energy_value = tile_enum.metadata.energy_value
+            passable = tile_enum.metadata.passable
+            print(f"DEBUG: Spawned Zorp {new_zorp.id} at {new_zorp.position} on tile {tile_enum.name} (Passable: {passable}, Resource: {resource_type.name}, EnergyVal: {energy_value:.1f}) with E: {new_zorp.energy:.1f} Alive: {new_zorp.alive}")
         print(f"Successfully spawned {len(self.world.all_zorps)} Zorps into ZorpWorld.")
 
         # Count Zorps in ECS after spawning (This will be 0 for AgentMarker if we removed creation)

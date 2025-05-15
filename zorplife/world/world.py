@@ -9,10 +9,16 @@ from zorplife.world.tiles import ResourceType, Tile
 # Basic energy costs for actions (can be moved to GameConfig)
 ENERGY_COST_MOVE = 1.0
 ENERGY_COST_EAT_ATTEMPT = 0.5
-ENERGY_COST_REPRODUCE_ATTEMPT = 5.0 # Higher cost even if not successful yet
+ENERGY_COST_REPRODUCE_ATTEMPT = 2.0 # Cost for a failed attempt or if not eligible
 ENERGY_COST_EMIT_SIGNAL = 0.2
 ENERGY_COST_REST = 0.0 # Resting might even regain a tiny bit or have a very low cost
 ENERGY_COST_THINK = 0.1 # Base cost for thinking per tick
+
+# Reproduction related constants
+REPRODUCTION_MIN_ENERGY_THRESHOLD_FACTOR = 0.8 # Zorp needs 80% of its max_energy to be eligible
+REPRODUCTION_ACTUAL_COST_FACTOR = 0.5          # Parent loses 50% of its max_energy upon successful reproduction
+REPRODUCTION_CHILD_INITIAL_ENERGY_FACTOR = 0.25  # Child starts with 25% of parent's max_energy
+REGROW_TICKS = 50
 
 EDIBLE_RESOURCE_TYPES = [ResourceType.PLANT_MATTER, ResourceType.APPLES, ResourceType.MUSHROOMS, ResourceType.ORGANIC_MATTER]
 
@@ -41,6 +47,19 @@ class ZorpWorld:
         # For faster spatial lookups, maps (x, y) to a list of Zorp IDs or Zorp objects
         # This helps in finding neighbors or objects at a specific location.
         self.zorp_spatial_map: Dict[Tuple[int, int], List[Zorp]] = {}
+
+        # Per-tile resource energy map
+        self.resource_energy_map: np.ndarray = np.zeros((self.height, self.width), dtype=np.float32)
+        for y in range(self.height):
+            for x in range(self.width):
+                self.resource_energy_map[y, x] = self.map_data[y, x].metadata.energy_value
+
+        self.resource_regrow_timer: np.ndarray = np.zeros((self.height, self.width), dtype=np.int32)
+
+        # Logging timer variables
+        self.current_game_time: float = 0.0
+        self.log_timer: float = 0.0
+        self.log_interval: float = 2.0 # Log every 2 seconds
 
         # Placeholder for resource maps (to be developed in Stage 5)
         # self.entropy_map = np.zeros((self.width, self.height), dtype=float)
@@ -109,8 +128,16 @@ class ZorpWorld:
         tile_enum: Tile = self.map_data[position[1], position[0]]
         return tile_enum.metadata.passable
 
-    def tick(self) -> None:
+    def tick(self, dt: float) -> None:
         """Advances the world state by one simulation step."""
+        self.current_game_time += dt
+        allow_logging_this_tick = False
+        if self.current_game_time >= self.log_timer + self.log_interval:
+            allow_logging_this_tick = True
+            self.log_timer = self.current_game_time
+            if allow_logging_this_tick:
+                 print(f"[ZorpWorld tick] --- Logging interval reached at game time {self.current_game_time:.2f}s ---")
+
         zorps_to_remove: List[Zorp] = []
         for zorp in self.all_zorps:
             if not zorp.alive:
@@ -118,29 +145,38 @@ class ZorpWorld:
                 continue
 
             # Zorp decides action (can be hunger-driven or NN-driven)
-            # This requires Zorp class to have a 'decide_action' method
-            # and its 'update' method to be renamed or refactored (e.g., to 'passive_update')
-            action_choice = zorp.decide_action(self) # Changed from zorp.think(self)
-            # print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_before_action: {zorp.energy:.1f} Chosen Action: {action_choice.action_type}")
-            print(f"[ZorpWorld tick] Zorp {zorp.id} (E: {zorp.energy:.1f}) decided action: {action_choice.action_type}, Details: {action_choice}")
+            action_choice = zorp.decide_action(self, allow_logging_this_tick) # Pass logging flag
+            
+            if allow_logging_this_tick:
+                print(f"[ZorpWorld tick] Zorp {zorp.id} (E: {zorp.energy:.1f}) decided action: {action_choice.action_type}, Details: {action_choice}")
             
             # Apply the chosen action
-            self._apply_action(zorp, action_choice)
-            # print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_after_action: {zorp.energy:.1f} Alive_after_action: {zorp.alive}")
+            self._apply_action(zorp, action_choice, allow_logging_this_tick) # Pass logging flag
             
             # Zorp's internal passive state update (aging, base metabolism cost of living)
-            # This requires Zorp.update to be refactored into something like Zorp.passive_update()
-            zorp.passive_update(self) # Changed from zorp.update(self)
-            # print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_after_passive_update: {zorp.energy:.1f} Alive_after_passive_update: {zorp.alive}")
+            zorp.passive_update(self) 
 
             if not zorp.alive: # Check again if action or update killed it
                 zorps_to_remove.append(zorp)
 
         for zorp in zorps_to_remove:
+            if allow_logging_this_tick: # Also gate this log
+                print(f"[ZorpWorld tick] Zorp {zorp.id} removed from world.")
             self.remove_zorp(zorp)
-            # print(f"Zorp {zorp.id} removed from world.")
+            # print(f"Zorp {zorp.id} removed from world.") # Original unconditional print
 
-    def _apply_action(self, zorp: Zorp, action: ActionChoice) -> None:
+        # Regrow resources
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.resource_regrow_timer[y, x] > 0:
+                    self.resource_regrow_timer[y, x] -= 1
+                    if self.resource_regrow_timer[y, x] == 0:
+                        # Restore original energy value from tile metadata
+                        self.resource_energy_map[y, x] = self.map_data[y, x].metadata.energy_value
+                        if allow_logging_this_tick: # Gate this log too
+                            print(f"[ZorpWorld tick] Resource at ({x},{y}) regrew to {self.resource_energy_map[y, x]:.1f}.")
+
+    def _apply_action(self, zorp: Zorp, action: ActionChoice, allow_log: bool) -> None:
         """Applies the Zorp's chosen action to the world and the Zorp itself."""
         zorp.energy -= ENERGY_COST_THINK # Cost for thinking
 
@@ -179,22 +215,56 @@ class ZorpWorld:
 
             # Check if the tile's resource type is something the Zorp can eat
             # and if the tile has a defined energy_value > 0
-            if tile_meta.energy_value > 0 and tile_meta.resource_type in EDIBLE_RESOURCE_TYPES:
-                energy_gained = tile_meta.energy_value
+            if tile_meta.energy_value > 0 and tile_meta.resource_type in EDIBLE_RESOURCE_TYPES and self.resource_energy_map[tile_y, tile_x] > 0:
+                energy_gained = self.resource_energy_map[tile_y, tile_x]
                 zorp.energy += energy_gained
-                zorp.energy = min(zorp.energy, zorp.max_energy) # Clamp to max energy
-                # print(f"DEBUG: Zorp {zorp.id} ATE {current_tile_enum.name}, gained {energy_gained:.1f} E. Total E: {zorp.energy:.1f}")
-                
-                # Optional: Tile depletion/change logic can go here
-                # For example, change GRASSLAND to DIRT for a while, or reduce a resource counter on the tile.
-                # For now, food is infinitely available on the tile.
-            # else:
-                # print(f"DEBUG: Zorp {zorp.id} tried to EAT {current_tile_enum.name} but it provides no/unsuitable energy.")
+                zorp.energy = min(zorp.energy, zorp.max_energy)
+                if allow_log:
+                    print(f"[ZorpWorld _apply_action EAT] Zorp {zorp.id} ATE {current_tile_enum.name}, gained {energy_gained:.1f} E. Total E: {zorp.energy:.1f}")
+                self.resource_energy_map[tile_y, tile_x] = 0.0
+                self.resource_regrow_timer[tile_y, tile_x] = REGROW_TICKS
+                if allow_log:
+                    print(f"[ZorpWorld _apply_action EAT] Tile {current_tile_enum.name} at ({tile_x},{tile_y}) depleted. Regrowth in {REGROW_TICKS} ticks.")
+
+            else:
+                if allow_log:
+                    print(f"[ZorpWorld _apply_action EAT] Zorp {zorp.id} tried to EAT {current_tile_enum.name} but it provides no/unsuitable energy.")
 
         elif action.action_type == ActionType.REPRODUCE:
-            # Placeholder: Zorp attempts to reproduce. Real logic in Stage 2.
-            zorp.energy -= ENERGY_COST_REPRODUCE_ATTEMPT
-            # TODO: Implement reproduction logic
+            parent_max_energy = zorp.max_energy
+            min_energy_to_reproduce = parent_max_energy * REPRODUCTION_MIN_ENERGY_THRESHOLD_FACTOR
+            actual_reproduction_cost = parent_max_energy * REPRODUCTION_ACTUAL_COST_FACTOR
+            child_initial_energy = parent_max_energy * REPRODUCTION_CHILD_INITIAL_ENERGY_FACTOR
+
+            if zorp.energy >= min_energy_to_reproduce:
+                spawn_location_found = False
+                best_spawn_pos: Optional[Tuple[int, int]] = None
+                deltas = [(dx, dy) for dx in [-1, 0, 1] for dy in [-1, 0, 1] if not (dx == 0 and dy == 0)]
+                np.random.shuffle(deltas)
+
+                for dx, dy in deltas:
+                    check_pos = (zorp.position[0] + dx, zorp.position[1] + dy)
+                    if (self.is_within_bounds(check_pos) and
+                        self.is_tile_passable_for_zorp(check_pos) and
+                        not self.get_zorps_at(check_pos)):
+                        best_spawn_pos = check_pos
+                        spawn_location_found = True
+                        break
+                
+                if spawn_location_found and best_spawn_pos is not None:
+                    zorp.energy -= actual_reproduction_cost
+                    new_zorp = Zorp(position=best_spawn_pos, energy=child_initial_energy)
+                    self.add_zorp(new_zorp)
+                    if allow_log:
+                        print(f"[ZorpWorld _apply_action REPRODUCE] Zorp {zorp.id} REPRODUCED. New Zorp {new_zorp.id} at {new_zorp.position} with E:{new_zorp.energy:.1f}. Parent E after: {zorp.energy:.1f}")
+                else:
+                    zorp.energy -= ENERGY_COST_REPRODUCE_ATTEMPT 
+                    if allow_log:
+                        print(f"[ZorpWorld _apply_action REPRODUCE] Zorp {zorp.id} FAILED to reproduce (no valid spawn location). Cost: {ENERGY_COST_REPRODUCE_ATTEMPT:.1f}. Parent E after: {zorp.energy:.1f}")
+            else:
+                zorp.energy -= ENERGY_COST_REPRODUCE_ATTEMPT
+                if allow_log:
+                    print(f"[ZorpWorld _apply_action REPRODUCE] Zorp {zorp.id} FAILED to reproduce (not enough energy: {zorp.energy:.1f}/{min_energy_to_reproduce:.1f}). Cost: {ENERGY_COST_REPRODUCE_ATTEMPT:.1f}. Parent E after: {zorp.energy:.1f}")
 
         elif action.action_type == ActionType.EMIT_SIGNAL:
             # Placeholder: Zorp emits a signal. Real logic in Stage 3.
@@ -234,8 +304,8 @@ class ZorpWorld:
         tile_meta = tile_enum.metadata
 
         food_metric = 0.0
-        if tile_meta.resource_type in EDIBLE_RESOURCE_TYPES and tile_meta.energy_value > 0:
-            food_metric = tile_meta.energy_value
+        if tile_meta.resource_type in EDIBLE_RESOURCE_TYPES and self.resource_energy_map[position[1], position[0]] > 0:
+            food_metric = self.resource_energy_map[position[1], position[0]]
         
         water_metric = 0.0
         if tile_meta.resource_type == ResourceType.WATER:

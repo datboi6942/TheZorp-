@@ -1,6 +1,7 @@
 import uuid
 import numpy as np
 from typing import Tuple, Dict, List, Any, TYPE_CHECKING, Optional
+import random
 
 from .brain import ZorpBrain, ActionType, ActionChoice # Assuming brain.py is in the same directory
 # from ..config import GameConfig # Would be ideal for default sizes
@@ -111,12 +112,13 @@ class Zorp:
         e_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
         return e_x / np.sum(e_x, axis=-1, keepdims=True)
 
-    def think(self, world: 'ZorpWorld') -> ActionChoice:
+    def think(self, world: 'ZorpWorld', allow_log: bool) -> ActionChoice:
         """
         Uses the ZorpBrain to decide on an action based on perception.
 
         Args:
             world: The ZorpWorld instance to perceive from.
+            allow_log: Boolean flag to enable/disable logging for this tick.
 
         Returns:
             An ActionChoice object representing the Zorp's decided action.
@@ -145,10 +147,11 @@ class Zorp:
             if dx == 0 and dy == 0:
                  # If move results in no change, force a random 1-step move.
                  # This ensures that if the NN decides to move, it actually moves.
-                 print(f"[Zorp {self.id} think] NN chose MOVE but delta was (0,0). Forcing random 1-step move.")
-                 possible_moves = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-                 chosen_move_idx = np.random.choice(len(possible_moves))
-                 dx, dy = possible_moves[chosen_move_idx]
+                if allow_log:
+                    print(f"[Zorp {self.id} think] NN chose MOVE but delta was (0,0). Forcing random 1-step move.")
+                possible_moves = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+                chosen_move_idx = np.random.choice(len(possible_moves))
+                dx, dy = possible_moves[chosen_move_idx]
             move_delta = (dx, dy)
         
         elif chosen_action_type == ActionType.EMIT_SIGNAL:
@@ -162,28 +165,37 @@ class Zorp:
             move_delta=move_delta,
             signal_vector=signal_vector
         )
-        print(f"[Zorp {self.id} think] NN chose action: {chosen_action_type}, Details: {result_action_choice}")
+        if allow_log:
+            print(f"[Zorp {self.id} think] NN chose action: {chosen_action_type}, Details: {result_action_choice}")
         return result_action_choice
 
-    def decide_action(self, world: 'ZorpWorld') -> ActionChoice:
+    def decide_action(self, world: 'ZorpWorld', allow_log: bool) -> ActionChoice:
         """
         Decides the Zorp's next action based on its state (e.g., hunger) or brain.
         This is the main decision-making entry point called by ZorpWorld.tick().
+        
+        Args:
+            world: The ZorpWorld instance.
+            allow_log: Boolean flag to enable/disable logging for this tick.
         """
         hunger_trigger_value = self.max_energy * HUNGER_THRESHOLD_PERCENT
-        print(f"[Zorp {self.id} decide_action] Energy: {self.energy:.1f}/{self.max_energy:.1f}, Hunger Threshold: < {hunger_trigger_value:.1f}")
+        if allow_log:
+            print(f"[Zorp {self.id} decide_action] Energy: {self.energy:.1f}/{self.max_energy:.1f}, Hunger Threshold: < {hunger_trigger_value:.1f}")
 
         # Hybrid Behavior:
         # 1. Hardcoded: Seek food if hungry
         if self.energy < hunger_trigger_value:
-            print(f"[Zorp {self.id} decide_action] Hungry. Calling seek_food().")
-            action = self.seek_food(world)
+            if allow_log:
+                print(f"[Zorp {self.id} decide_action] Hungry. Calling seek_food().")
+            action = self.seek_food(world, allow_log)
         # 2. Emergent: Otherwise, use the neural network
         else:
-            print(f"[Zorp {self.id} decide_action] Not hungry. Calling think().")
-            action = self.think(world)
+            if allow_log:
+                print(f"[Zorp {self.id} decide_action] Not hungry. Calling think().")
+            action = self.think(world, allow_log) # Pass allow_log to think method
         
-        print(f"[Zorp {self.id} decide_action] Chosen action: {action.action_type}, Details: {action}")
+        if allow_log:
+            print(f"[Zorp {self.id} decide_action] Chosen action: {action.action_type}, Details: {action}")
         return action
 
     def passive_update(self, world: 'ZorpWorld') -> None:
@@ -198,7 +210,7 @@ class Zorp:
             return
 
         # Basic energy consumption for existing (cost of living)
-        self.energy -= 0.5 # Reduced base cost, as actions now have costs via ZorpWorld._apply_action
+        self.energy -= 0.2 # Lowered base cost for slower energy drain
         if self.energy <= 0:
             self.alive = False
             # print(f"Zorp {self.id} starved during passive_update.")
@@ -206,64 +218,155 @@ class Zorp:
         
         self.age += 1
 
-    def seek_food(self, world: 'ZorpWorld') -> ActionChoice:
+    def seek_food(self, world: 'ZorpWorld', allow_log: bool) -> ActionChoice:
         """
         Hardcoded behavior to find and move towards the nearest food source, or eat if already on food.
+        Scans a 5x5 area around the Zorp.
 
         Args:
             world: The ZorpWorld instance.
+            allow_log: Boolean flag to enable/disable logging for this tick.
 
         Returns:
             An ActionChoice (EAT, MOVE, or REST).
         """
-        print(f"[Zorp {self.id} seek_food] Called. Position: {self.position}, Energy: {self.energy:.1f}")
+        if allow_log:
+            print(f"[Zorp {self.id} seek_food] Called. Position: {self.position}, Energy: {self.energy:.1f}")
         # 1. Check current tile for food
         current_resources = world.get_resources_at(self.position)
-        print(f"[Zorp {self.id} seek_food] Resources at current pos {self.position}: {current_resources}")
+        if allow_log:
+            print(f"[Zorp {self.id} seek_food] Resources at current pos {self.position}: {current_resources}")
         if current_resources[0] > 0: # Index 0 is food_metric (energy value)
-            print(f"[Zorp {self.id} seek_food] Food on current tile. Choosing EAT.")
+            if allow_log:
+                print(f"[Zorp {self.id} seek_food] Food on current tile. Choosing EAT.")
             return ActionChoice(action_type=ActionType.EAT)
 
-        # 2. Scan immediate neighbors for food if not eating on current tile
-        print(f"[Zorp {self.id} seek_food] No food on current tile. Scanning neighbors.")
-        for dx_offset in [-1, 0, 1]:
-            for dy_offset in [-1, 0, 1]:
-                if dx_offset == 0 and dy_offset == 0:
-                    continue # Skip current tile
-                
-                check_pos = (self.position[0] + dx_offset, self.position[1] + dy_offset)
-                
-                if not world.is_within_bounds(check_pos):
-                    # print(f"[Zorp {self.id} seek_food] Neighbor {check_pos} is out of bounds.")
-                    continue
-
-                resources_at_check_pos = world.get_resources_at(check_pos)
-                passable = world.is_tile_passable_for_zorp(check_pos)
-                print(f"[Zorp {self.id} seek_food] Checking neighbor {check_pos}: Resources={resources_at_check_pos}, Passable={passable}")
-
-                if resources_at_check_pos[0] > 0: # Food found
-                    if passable:
-                        print(f"[Zorp {self.id} seek_food] Food found at {check_pos}. Choosing MOVE.")
-                        return ActionChoice(action_type=ActionType.MOVE, move_delta=(dx_offset, dy_offset))
-                    else:
-                        print(f"[Zorp {self.id} seek_food] Food at {check_pos} but not passable.")
+        # 2. Scan a 5x5 area (radius 2) for food if not eating on current tile
+        if allow_log:
+            print(f"[Zorp {self.id} seek_food] No food on current tile. Scanning 5x5 area.")
         
-        # 3. If no food on current tile or adjacent passable tiles, perform a small random walk or REST
-        print(f"[Zorp {self.id} seek_food] No immediate food found. Resorting to random move/rest.")
-        rand_dx = np.random.randint(-1, 2)
-        rand_dy = np.random.randint(-1, 2)
-        
-        if rand_dx == 0 and rand_dy == 0: # If random choice is to stay, REST
-            # print(f"Zorp {self.id} chose random REST while seeking food.")
-            return ActionChoice(action_type=ActionType.REST)
+        found_food_sources: List[Tuple[Tuple[Tuple[int, int], Tuple[int, int]], int]] = [] # List of ((food_pos, food_offset_from_zorp), distance_squared)
 
-        next_pos_candidate = (self.position[0] + rand_dx, self.position[1] + rand_dy)
-        if world.is_tile_passable_for_zorp(next_pos_candidate):
-            # print(f"Zorp {self.id} random move to {next_pos_candidate} while seeking food.")
-            return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx, rand_dy))
-        else: # If random move is blocked, just rest
-            # print(f"Zorp {self.id} random move blocked, chose REST while seeking food.")
-            return ActionChoice(action_type=ActionType.REST)
+        for r_offset in range(1, 3): # Radius 1 and 2
+            for dx_offset in range(-r_offset, r_offset + 1):
+                for dy_offset in range(-r_offset, r_offset + 1):
+                    # Only check the perimeter of the current radius for distinct distance rings,
+                    # or simply iterate all cells in 5x5 excluding center.
+                    # For simplicity and ensuring all cells are checked once if not on perimeter definition:
+                    if dx_offset == 0 and dy_offset == 0: # Already checked current tile
+                        continue
+                    
+                    # Check only cells within the 2-tile radius boundary for 5x5 scan
+                    if abs(dx_offset) > 2 or abs(dy_offset) > 2:
+                        continue
+
+                    check_pos = (self.position[0] + dx_offset, self.position[1] + dy_offset)
+                    
+                    if not world.is_within_bounds(check_pos):
+                        continue
+
+                    resources_at_check_pos = world.get_resources_at(check_pos)
+                    # print(f"[Zorp {self.id} seek_food] Scanning {check_pos}: Resources={resources_at_check_pos}")
+
+                    if resources_at_check_pos[0] > 0: # Food found
+                        distance_sq = dx_offset**2 + dy_offset**2 # Use squared distance to avoid sqrt, for ranking
+                        found_food_sources.append(((check_pos, (dx_offset, dy_offset)), distance_sq))
+        
+        if not found_food_sources:
+            # 3. If no food in 5x5 area, perform a small random walk or REST
+            if allow_log:
+                print(f"[Zorp {self.id} seek_food] No food found in 5x5 area. Resorting to random move/rest.")
+            rand_dx = np.random.randint(-1, 2)
+            rand_dy = np.random.randint(-1, 2)
+            
+            if rand_dx == 0 and rand_dy == 0:
+                return ActionChoice(action_type=ActionType.REST)
+
+            next_pos_candidate = (self.position[0] + rand_dx, self.position[1] + rand_dy)
+            if world.is_tile_passable_for_zorp(next_pos_candidate):
+                return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx, rand_dy))
+            else:
+                return ActionChoice(action_type=ActionType.REST)
+
+        # Sort food sources by distance (ascending)
+        found_food_sources.sort(key=lambda item: item[1])
+        
+        min_dist_sq = found_food_sources[0][1]
+        closest_food_items = [item for item in found_food_sources if item[1] == min_dist_sq]
+        
+        # Randomly select one from the closest food items
+        selected_food_item_tuple = random.choice(closest_food_items)
+        target_food_pos, (target_dx_offset, target_dy_offset) = selected_food_item_tuple[0]
+
+        if allow_log:
+            print(f"[Zorp {self.id} seek_food] Closest food at {target_food_pos} (offset: ({target_dx_offset},{target_dy_offset})). Attempting to move.")
+
+        # Now, try to move towards the selected target_food_pos
+        passable = world.is_tile_passable_for_zorp(target_food_pos)
+        if passable:
+            direct_step_dx = np.sign(target_dx_offset).astype(int)
+            direct_step_dy = np.sign(target_dy_offset).astype(int)
+            
+            target_one_step_pos = (self.position[0] + direct_step_dx, self.position[1] + direct_step_dy)
+
+            if world.is_tile_passable_for_zorp(target_one_step_pos):
+                if allow_log:
+                    print(f"[Zorp {self.id} seek_food] Choosing direct MOVE via ({direct_step_dx},{direct_step_dy}) towards {target_food_pos}.")
+                return ActionChoice(action_type=ActionType.MOVE, move_delta=(direct_step_dx, direct_step_dy))
+            else:
+                if allow_log:
+                    print(f"[Zorp {self.id} seek_food] Direct first step {target_one_step_pos} to {target_food_pos} blocked. Trying alternatives.")
+                # Try alternative first steps that reduce Manhattan distance
+                current_dist_x_to_target = abs(target_dx_offset)
+                current_dist_y_to_target = abs(target_dy_offset)
+                
+                possible_first_steps = [
+                    (sdx, sdy) for sdx in [-1, 0, 1] for sdy in [-1, 0, 1] 
+                    if not (sdx == 0 and sdy == 0)
+                ]
+                random.shuffle(possible_first_steps)
+
+                for alt_dx, alt_dy in possible_first_steps:
+                    alt_step_pos = (self.position[0] + alt_dx, self.position[1] + alt_dy)
+                    if world.is_tile_passable_for_zorp(alt_step_pos):
+                        # Calculate new Manhattan distance to the chosen target_food_pos if this alternative step is taken
+                        new_food_pos_relative_to_alt_step = (target_food_pos[0] - alt_step_pos[0], target_food_pos[1] - alt_step_pos[1])
+                        new_dist_to_food = abs(new_food_pos_relative_to_alt_step[0]) + abs(new_food_pos_relative_to_alt_step[1])
+                        original_dist_to_food = current_dist_x_to_target + current_dist_y_to_target # Manhattan dist to target
+
+                        if new_dist_to_food < original_dist_to_food:
+                            if allow_log:
+                                print(f"[Zorp {self.id} seek_food] Found alternative step ({alt_dx},{alt_dy}) towards food at {target_food_pos}.")
+                            return ActionChoice(action_type=ActionType.MOVE, move_delta=(alt_dx, alt_dy))
+                
+                if allow_log:
+                    print(f"[Zorp {self.id} seek_food] No better alternative first step found for food at {target_food_pos}. Opting for random valid move or REST.")
+                # Fallback if no alternative helps: random valid move or rest
+                rand_dx_fallback = np.random.randint(-1, 2)
+                rand_dy_fallback = np.random.randint(-1, 2)
+                if rand_dx_fallback == 0 and rand_dy_fallback == 0:
+                    return ActionChoice(action_type=ActionType.REST)
+                
+                next_pos_candidate_fallback = (self.position[0] + rand_dx_fallback, self.position[1] + rand_dy_fallback)
+                if world.is_tile_passable_for_zorp(next_pos_candidate_fallback):
+                    return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx_fallback, rand_dy_fallback))
+                else:
+                    return ActionChoice(action_type=ActionType.REST)
+
+        else: # Food is on an impassable tile
+            if allow_log:
+                print(f"[Zorp {self.id} seek_food] Selected closest food at {target_food_pos} is on an impassable tile. Opting for random valid move or REST.")
+            # Fallback: random valid move or rest
+            rand_dx_fallback = np.random.randint(-1, 2)
+            rand_dy_fallback = np.random.randint(-1, 2)
+            if rand_dx_fallback == 0 and rand_dy_fallback == 0:
+                return ActionChoice(action_type=ActionType.REST)
+            
+            next_pos_candidate_fallback = (self.position[0] + rand_dx_fallback, self.position[1] + rand_dy_fallback)
+            if world.is_tile_passable_for_zorp(next_pos_candidate_fallback):
+                return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx_fallback, rand_dy_fallback))
+            else:
+                return ActionChoice(action_type=ActionType.REST)
 
     def __repr__(self) -> str:
         return f"Zorp(id={self.id}, pos={self.position}, energy={self.energy:.1f}, age={self.age}, alive={self.alive})"
@@ -283,7 +386,7 @@ if __name__ == '__main__':
 
     # Simulate perception and thinking
     try:
-        action_choice = zorp.think(world_instance)
+        action_choice = zorp.think(world_instance, True)
         print(f"Zorp chose action: {action_choice}")
         if action_choice.action_type == ActionType.MOVE:
             print(f"Move details: {action_choice.move_delta}")

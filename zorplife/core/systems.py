@@ -8,6 +8,7 @@ from zorplife.ui.sprites import SpriteSheet # Import SpriteSheet
 from zorplife.world.tiles import Tile, ResourceType # For type hint & ORGANIC_MATTER
 from zorplife.agents.components import Position, Energy, Age, Genetics, AgentMarker # Agent components
 import random
+from pyglet import math # Import pyglet.math for Mat4 identity
 
 # if TYPE_CHECKING:
 #     # No longer needed as esper.World object is not used.
@@ -279,8 +280,8 @@ class RenderSystem(System):
             font_name='Arial', 
             font_size=12, 
             x=10, y=self.window.height - 20, 
-            anchor_x='left', anchor_y='top',
-            batch=self.batch # Add to main batch
+            anchor_x='left', anchor_y='top'
+            # batch=self.batch <--- REMOVE THIS LINE
             # group=self.ui_group # If UI group is used
         )
         self.current_fps = 0.0 # To update the label
@@ -296,7 +297,6 @@ class RenderSystem(System):
             print("Cannot prepare map renderables: map_data is None.")
             return
 
-        # Clear existing tile sprites before regenerating
         for sprite in self.tile_sprites:
             sprite.delete()
         self.tile_sprites.clear()
@@ -307,138 +307,129 @@ class RenderSystem(System):
                 tile_enum = self.map_data[r, c]
                 try:
                     meta = tile_enum.metadata
-                    base_x = c * self.tile_render_size
+                    # Define in WORLD coordinates
+                    base_x = c * self.tile_render_size 
                     base_y = r * self.tile_render_size
 
-                    # Draw base rectangle
                     square = pyglet.shapes.Rectangle(
-                        x=base_x,
+                        x=base_x, 
                         y=base_y,
                         width=self.tile_render_size,
                         height=self.tile_render_size,
-                        color=meta.base_color[:3], # pyglet shapes color is 3-tuple or 4-tuple for opacity
+                        color=meta.base_color[:3],
                         batch=self.batch,
                         group=self.tile_group
                     )
                     self.tile_sprites.append(square)
 
-                    # Draw spots if defined
                     if meta.spot_color and meta.spot_count > 0:
-                        spot_draw_size = self.tile_render_size * meta.spot_size_ratio
-                        # Ensure spots are not too small to see or too large
-                        spot_draw_size = max(1, min(spot_draw_size, self.tile_render_size / 2))
+                        spot_world_size = self.tile_render_size * meta.spot_size_ratio
+                        spot_world_size = max(1, min(spot_world_size, self.tile_render_size / 2))
                         
                         for _ in range(meta.spot_count):
-                            # Random offset within the tile, ensuring spots are fully visible
-                            # by leaving a margin equal to spot_draw_size / 2
-                            margin = spot_draw_size / 2
-                            spot_x = base_x + margin + random.uniform(0, self.tile_render_size - spot_draw_size)
-                            spot_y = base_y + margin + random.uniform(0, self.tile_render_size - spot_draw_size)
+                            margin = spot_world_size / 2 # World space margin
+                            spot_center_x_world = base_x + margin + random.uniform(0, self.tile_render_size - spot_world_size)
+                            spot_center_y_world = base_y + margin + random.uniform(0, self.tile_render_size - spot_world_size)
                             
                             spot_shape = pyglet.shapes.Circle(
-                                x=spot_x + spot_draw_size / 2, # Circle x,y is center
-                                y=spot_y + spot_draw_size / 2,
-                                radius=spot_draw_size / 2,
+                                x=spot_center_x_world, # WORLD coordinates for center
+                                y=spot_center_y_world,
+                                radius=spot_world_size / 2, # WORLD radius
                                 color=meta.spot_color[:3],
                                 batch=self.batch,
-                                group=self.tile_group # Same group, drawn after base
+                                group=self.tile_group
                             )
                             self.tile_sprites.append(spot_shape)
-
                 except Exception as e:
                     print(f"Error preparing sprite for tile {tile_enum} at ({r},{c}): {e}")
         print(f"Map renderables prepared. {len(self.tile_sprites)} tile sprites created.")
 
     def _get_zorp_color(self, energy: float, max_energy: float = 100.0) -> Tuple[int, int, int]:
-        """Calculates Zorp color based on energy (Green to Red)."""
         energy_ratio = max(0, min(1, energy / max_energy))
-        red = int(255 * (1 - energy_ratio))
-        green = int(255 * energy_ratio)
-        blue = 0
-        return (red, green, blue)
+        if energy_ratio > 0.7:
+            return (int(100 * (1 - energy_ratio) * 2.5), 200, int(50 * (1 - energy_ratio) * 2.5))
+        elif energy_ratio > 0.3:
+            return (255, int(150 + 105 * (energy_ratio - 0.3) / 0.4), 0)
+        else:
+            return (255, int(100 * energy_ratio / 0.3), 0)
 
     def process_main_render_loop(self, dt: float) -> None:
+        self.world_ref.tick(dt)
         self.window.clear()
-        print(f"[RenderSystem] process_main_render_loop called")
-        print(f"[RenderSystem] Number of tile sprites: {len(self.tile_sprites)}")
-        print(f"[RenderSystem] Number of Zorps in world: {len(self.world_ref.all_zorps)}")
-        print(f"[RenderSystem] Number of Zorp visuals: {len(self.zorp_visuals)}")
-        
-        # Apply camera transformations
-        # pyglet.gl.glPushMatrix() # Removed due to AttributeError
+
+        # Set the window's view transform for the world batch
         self.window.view = self.camera.get_view_matrix()
-        
-        # Update FPS label (Engine should call update_fps_display with actual FPS)
-        # For now, just to ensure it's visible if batching is correct
-        # self.fps_label.text = f"FPS: {self.current_fps:.2f}" 
 
-        # --- Zorp Rendering --- 
-        current_zorp_ids = {zorp.id for zorp in self.world_ref.all_zorps if zorp.alive}
-
-        # Remove visuals for Zorps that are no longer present or dead
-        for zorp_id in list(self.zorp_visuals.keys()):
-            if zorp_id not in current_zorp_ids:
-                self.zorp_visuals[zorp_id].delete()
-                del self.zorp_visuals[zorp_id]
-
-        # Update existing Zorps and add new ones
+        current_zorp_ids_in_world = set()
         for zorp in self.world_ref.all_zorps:
-            print(f"DEBUG RENDER: Processing Zorp {zorp.id} Pos:{zorp.position} E:{zorp.energy:.1f} Alive:{zorp.alive}")
+            current_zorp_ids_in_world.add(zorp.id)
             if not zorp.alive:
-                print(f"DEBUG RENDER: Zorp {zorp.id} is not alive, skipping visual update/creation.")
+                if zorp.id in self.zorp_visuals:
+                    self.zorp_visuals[zorp.id].delete()
+                    del self.zorp_visuals[zorp.id]
+                    if zorp.id + '_debug' in self.zorp_visuals:
+                        self.zorp_visuals[zorp.id + '_debug'].delete()
+                        del self.zorp_visuals[zorp.id + '_debug']
                 continue
 
+            # Zorp positions and sizes are in WORLD coordinates
             tile_x, tile_y = zorp.position
-            # Center of the tile for rendering
-            world_x = tile_x * self.tile_render_size + self.tile_render_size / 2.0
-            world_y = tile_y * self.tile_render_size + self.tile_render_size / 2.0
-            radius = self.tile_render_size / 3.0
-            color = self._get_zorp_color(zorp.energy)
+            world_x_center = tile_x * self.tile_render_size + self.tile_render_size / 2.0
+            world_y_center = tile_y * self.tile_render_size + self.tile_render_size / 2.0
+            world_radius = self.tile_render_size / 3.0 
+            color = self._get_zorp_color(zorp.energy, zorp.max_energy)
 
             if zorp.id in self.zorp_visuals:
                 shape = self.zorp_visuals[zorp.id]
-                shape.x = world_x
-                shape.y = world_y
-                shape.radius = radius # In case tile_render_size changes with zoom, though radius is fixed here
+                shape.x = world_x_center
+                shape.y = world_y_center
+                shape.radius = world_radius 
                 shape.color = color
-                # shape.opacity = 255 # Ensure visible
+                shape.opacity = 255
+                # Debug shape also in world coordinates
+                if zorp.id + '_debug' in self.zorp_visuals:
+                    debug_shape = self.zorp_visuals[zorp.id + '_debug']
+                    debug_shape.x = world_x_center - self.tile_render_size / 4 # Offset from center
+                    debug_shape.y = world_y_center - self.tile_render_size / 4
+                    # Assuming debug shape width/height are fixed in world units
+                    debug_shape.width = self.tile_render_size / 2 
+                    debug_shape.height = self.tile_render_size / 2
             else:
-                print(f"DEBUG RENDER: Creating NEW visual for Zorp {zorp.id} at W_Pos:({world_x:.1f},{world_y:.1f}) Color:{color}")
                 new_shape = pyglet.shapes.Circle(
-                    world_x, world_y, radius,
+                    world_x_center, world_y_center, world_radius, # WORLD coordinates
                     color=color,
-                    batch=self.batch, # Use the main batch
-                    group=self.agent_group # Render on top of tiles
-                )
-                self.zorp_visuals[zorp.id] = new_shape
-                # Add debug rectangle overlay
-                debug_rect = pyglet.shapes.Rectangle(
-                    x=world_x - self.tile_render_size/4,
-                    y=world_y - self.tile_render_size/4,
-                    width=self.tile_render_size/2,
-                    height=self.tile_render_size/2,
-                    color=(255, 0, 255),
                     batch=self.batch,
                     group=self.agent_group
                 )
-                self.zorp_visuals[str(zorp.id) + '_debug'] = debug_rect
-        
-        print(f"[RenderSystem] About to call self.batch.draw()")
-        # --- Draw everything --- 
-        self.batch.draw() # Draw all batched sprites and shapes
-        
-        # Revert camera transformations for UI elements if any (or reset view)
-        # pyglet.gl.glPopMatrix() # Removed due to AttributeError
-        # To draw UI elements in screen space after this, reset the view:
-        # self.window.view = pyglet.math.Mat4() # Identity matrix
-        
-        # Any UI elements drawn AFTER revert_transform will be in screen space
-        # Example: self.fps_label.draw() if not in batch or if batch is drawn before revert
-        # If FPS label is in the main batch, it's already drawn. Ensure its position is updated if needed.
+                self.zorp_visuals[zorp.id] = new_shape
+                # Optionally create debug rect in world coordinates if needed
+                # debug_rect = pyglet.shapes.Rectangle(
+                #     x = world_x_center - self.tile_render_size / 4, 
+                #     y = world_y_center - self.tile_render_size / 4, 
+                #     width = self.tile_render_size / 2, 
+                #     height = self.tile_render_size / 2, 
+                #     color=(255,0,255), batch=self.batch, group=self.agent_group)
+                # self.zorp_visuals[zorp.id + '_debug'] = debug_rect
 
-    # This is the method called by esper.add_processor
+        zorp_ids_in_visuals = list(self.zorp_visuals.keys())
+        for zorp_id_visual in zorp_ids_in_visuals:
+            is_debug_visual = zorp_id_visual.endswith('_debug')
+            actual_zorp_id = zorp_id_visual.replace('_debug', '')
+            if actual_zorp_id not in current_zorp_ids_in_world:
+                if self.zorp_visuals[zorp_id_visual]:
+                    self.zorp_visuals[zorp_id_visual].delete()
+                    del self.zorp_visuals[zorp_id_visual]
+
+        self.batch.draw() # This draws everything affected by self.window.view
+
+        # Reset view for UI elements (like FPS label) to draw in screen coordinates
+        self.window.view = math.Mat4() # Identity matrix
+        if self.fps_label: # Ensure fps_label is drawn after resetting the view
+             self.fps_label.draw()
+
     def process(self, dt: float) -> None:
-        # print(f"RenderSystem.process called, dt: {dt}") # DEBUG
-        if self.window.has_exit:
-            return
-        self.process_main_render_loop(dt) 
+        self.process_main_render_loop(dt)
+
+# --- Main Game Class (Example of how systems might be wired) --- #
+# This is a conceptual placeholder. Actual game class might be elsewhere.
+# ... existing code ... 
