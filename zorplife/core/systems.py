@@ -241,66 +241,48 @@ class ReproductionSystem(System):
 
 class RenderSystem(System):
     def __init__(
-        self, 
-        window: pyglet.window.Window, 
-        camera: Camera, 
-        map_data: Optional[np.ndarray], # Expect np.ndarray[Tile]
+        self,
+        window: pyglet.window.Window,
+        camera: 'Camera', 
+        batch: pyglet.graphics.Batch, 
         tile_render_size: int,
-        world_ref: 'ZorpWorld' # New parameter
+        world_ref: Optional['ZorpWorld'] = None # Optional ZorpWorld reference
     ) -> None:
         super().__init__()
         self.window = window
         self.camera = camera
-        self.map_data = map_data # This is np.ndarray[Tile]
+        self.batch = batch # Use the shared batch from Engine
+        self.tile_sprites: List[pyglet.shapes.ShapeBase] = [] # Store all tile sprites for potential clearing
+        self.zorp_visuals: Dict[str, pyglet.shapes.ShapeBase] = {}
+        self.map_data: Optional[List[List[Tile]]] = None # Will be set by the Engine after map generation
         self.tile_render_size = tile_render_size
-        self.world_ref = world_ref # Store reference to ZorpWorld
+        self.tile_group = pyglet.graphics.Group(order=0)  # For tiles (background)
+        self.agent_group = pyglet.graphics.Group(order=1) # For agents (foreground)
+        self.debug_group = pyglet.graphics.Group(order=2) # For debug text
+        self.world_ref: Optional['ZorpWorld'] = world_ref
 
-        # Rendering batches and groups
-        self.batch = pyglet.graphics.Batch() # Main batch for all rendering
-        self.tile_group = Group(order=0) # Group for map tiles
-        self.agent_group = Group(order=1) # Group for agents (Zorps)
-        # self.ui_group = Group(order=2) # Group for UI elements (if any)
-
-        self.tile_sprites: List[pyglet.sprite.Sprite] = [] # List to hold tile sprites
-        
-        # self.zorp_sprites: Dict[int, pyglet.sprite.Sprite] = {} # Old: ent_id -> Sprite
-        self.zorp_visuals: Dict[str, pyglet.shapes.ShapeBase] = {} # New: zorp.id (str) -> pyglet.shapes.Circle or similar
-        
-        # Placeholder for Zorp sprite sheet if we use sprites later
-        # self.zorp_sprite_sheet = SpriteSheet(image_path='path/to/zorp_sheet.png', ...) 
-
-        if self.map_data is not None:
-            self._prepare_map_renderables()
-        else:
-            print("RenderSystem initialized with no map_data.")
-        
-        # Debug label for FPS
         self.fps_label = pyglet.text.Label(
             'FPS: 0', 
-            font_name='Arial', 
-            font_size=12, 
-            x=10, y=self.window.height - 20, 
-            anchor_x='left', anchor_y='top'
-            # batch=self.batch <--- REMOVE THIS LINE
-            # group=self.ui_group # If UI group is used
+            font_name='Arial', font_size=12, 
+            x=10, y=self.window.height - 20, anchor_x='left', anchor_y='top',
+            batch=None # Drawn separately, not part of the batch
         )
-        self.current_fps = 0.0 # To update the label
-
-    def update_fps_display(self, fps: float) -> None:
-        self.current_fps = fps
-        self.fps_label.text = f"FPS: {self.current_fps:.2f}"
-        # Adjust position if window resizes, or do it in on_resize
-        self.fps_label.y = self.window.height - 20
+        self._prepare_map_renderables_call_count = 0 # DEBUG COUNTER
 
     def _prepare_map_renderables(self) -> None:
-        if self.map_data is None:
-            print("Cannot prepare map renderables: map_data is None.")
-            return
+        self._prepare_map_renderables_call_count += 1 # DEBUG COUNTER
+        print(f"[DEBUG RenderSystem] _prepare_map_renderables call count: {self._prepare_map_renderables_call_count}") # DEBUG COUNTER
 
+        if self.map_data is None:
+            print("[RenderSystem] Map data not available for rendering.")
+            return
+        
+        # Clear existing tile sprites before redrawing
         for sprite in self.tile_sprites:
             sprite.delete()
         self.tile_sprites.clear()
-
+        
+        print(f"[RenderSystem] Preparing map renderables. Tile size: {self.tile_render_size}")
         rows, cols = self.map_data.shape
         for r in range(rows):
             for c in range(cols):
@@ -323,6 +305,11 @@ class RenderSystem(System):
                     self.tile_sprites.append(square)
 
                     if meta.spot_color and meta.spot_count > 0:
+                        # Seed for deterministic spot placement for THIS tile.
+                        # Using a tuple of coordinates and tile type ensures that if the tile type changes,
+                        # the spots will also change, which is desirable.
+                        random.seed(hash((c, r, tile_enum.value)))
+
                         spot_world_size = self.tile_render_size * meta.spot_size_ratio
                         spot_world_size = max(1, min(spot_world_size, self.tile_render_size / 2))
                         
@@ -354,11 +341,16 @@ class RenderSystem(System):
             return (255, int(100 * energy_ratio / 0.3), 0)
 
     def process_main_render_loop(self, dt: float) -> None:
-        self.world_ref.tick(dt)
         self.window.clear()
 
         # Set the window's view transform for the world batch
         self.window.view = self.camera.get_view_matrix()
+
+        # Check if map visuals need updating
+        if self.world_ref and self.world_ref.map_visuals_dirty:
+            print("[RenderSystem] map_visuals_dirty is True. Re-preparing map renderables.")
+            self._prepare_map_renderables()
+            self.world_ref.map_visuals_dirty = False # Reset the flag
 
         current_zorp_ids_in_world = set()
         for zorp in self.world_ref.all_zorps:
@@ -425,10 +417,18 @@ class RenderSystem(System):
         # Reset view for UI elements (like FPS label) to draw in screen coordinates
         self.window.view = math.Mat4() # Identity matrix
         if self.fps_label: # Ensure fps_label is drawn after resetting the view
-             self.fps_label.draw()
+            self.fps_label.draw()
 
     def process(self, dt: float) -> None:
         self.process_main_render_loop(dt)
+
+    def update_fps_display(self, fps: float) -> None:
+        """Update the FPS label text.
+
+        Args:
+            fps: The current frames per second value.
+        """
+        self.fps_label.text = f"FPS: {fps:.1f}"
 
 # --- Main Game Class (Example of how systems might be wired) --- #
 # This is a conceptual placeholder. Actual game class might be elsewhere.

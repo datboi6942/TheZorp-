@@ -30,6 +30,8 @@ class Engine:
         self.first_process_call_done = False # For debugging system registration
         # self.total_zorps_spawned = 0 # Track spawned zorps, will be handled by ZorpWorld
 
+        self.batch: Optional[pyglet.graphics.Batch] = None # Batch for rendering
+
         self.map_generator: MapGenerator = MapGenerator(
             width=self.config.map_width,
             height=self.config.map_height,
@@ -71,6 +73,7 @@ class Engine:
                     resizable=True
                 )
                 self.camera = Camera(self.window, self.config.camera_pan_speed, self.config.camera_zoom_speed)
+                self.batch = pyglet.graphics.Batch() # Initialize the batch here
                 # print("Pyglet window and camera initialized.") # DEBUG
 
                 @self.window.event
@@ -108,8 +111,8 @@ class Engine:
         # Input System (only if not headless)
         if self.window and self.camera: # Ensure window and camera are initialized
             self.input_system = InputSystem(self.window, self.camera)
-            esper.add_processor(self.input_system, priority=0) # InputSystem might still use esper if it's a Processor
-            print(f"Added system: InputSystem with priority 0")
+            # esper.add_processor(self.input_system, priority=0) # No longer using esper for this
+            print(f"Added system: InputSystem")
 
         # Metabolism System (Commented out - Zorp class handles its metabolism)
         # self.metabolism_system = MetabolismSystem(map_generator_ref=self.map_generator, tile_render_size=self.config.tile_render_size)
@@ -122,16 +125,16 @@ class Engine:
         # print(f"Added system: ReproductionSystem with priority 10")
 
         # Render System (only if not headless)
-        if self.window and self.camera: # Ensure window and camera are initialized
+        if self.window and self.camera and self.batch:
             self.render_system = RenderSystem(
                 window=self.window, 
                 camera=self.camera, 
-                map_data=self.map_generator.tile_grid_np, # Initial map data
+                batch=self.batch, # Pass the engine's batch
                 tile_render_size=self.config.tile_render_size,
-                world_ref=self.world # Pass the ZorpWorld instance
+                world_ref=self.world # Pass the ZorpWorld instance (might be None initially)
             )
             # esper.add_processor(self.render_system, priority=100) # No longer needed
-            print(f"Added system: RenderSystem with priority 100")
+            print(f"Added system: RenderSystem")
         
         # print("Systems initialized and added to Esper.") # DEBUG
 
