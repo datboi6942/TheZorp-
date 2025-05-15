@@ -228,7 +228,7 @@ class MapGenerator:
         gold_deposit_noise_map = self._generate_noise_map(
             gold_deposit_noise_scale, 2, 0.7, 2.0, gold_deposit_offset_x, gold_deposit_offset_y # Fewer octaves, higher persistence for rarer, larger patches
         )
-        print(f"Gold noise map range: min={np.min(gold_deposit_noise_map):.4f}, max={np.max(gold_deposit_noise_map):.4f}") # DEBUG
+        # print(f"Gold noise map range: min={np.min(gold_deposit_noise_map):.4f}, max={np.max(gold_deposit_noise_map):.4f}") # DEBUG REMOVED
 
         for y in range(self.height):
             for x in range(self.width):
@@ -247,25 +247,42 @@ class MapGenerator:
                 # Try to place Trees on FOREST_FLOOR or FOREST_HEAVY
                 if (current_tile == Tile.FOREST_FLOOR or current_tile == Tile.FOREST_HEAVY) and tree_noise_map[y][x] > TREE_SPAWN_THRESHOLD:
                     decrement_counts(current_tile, original_resource)
-                    self.tile_grid_np[y][x] = Tile.TREE
-                    self.biome_counts[Tile.TREE] = self.biome_counts.get(Tile.TREE, 0) + 1
+                    self.tile_grid_np[y][x] = Tile.TREE_TRUNK
+                    self.biome_counts[Tile.TREE_TRUNK] = self.biome_counts.get(Tile.TREE_TRUNK, 0) + 1
                     self.resource_counts[ResourceType.WOOD] = self.resource_counts.get(ResourceType.WOOD, 0) + 1
                     # Place canopy above if in bounds and not already a tree/canopy
                     if y + 1 < self.height:
                         above_tile = self.tile_grid_np[y+1][x]
-                        if above_tile not in (Tile.TREE, Tile.TREE_CANOPY):
+                        if above_tile not in (Tile.TREE_TRUNK, Tile.TREE_CANOPY):
+                            # Decrement counts for the tile being replaced by canopy
+                            above_tile_original_resource = above_tile.metadata.resource_type
+                            decrement_counts(above_tile, above_tile_original_resource)
+
                             self.tile_grid_np[y+1][x] = Tile.TREE_CANOPY
                             self.biome_counts[Tile.TREE_CANOPY] = self.biome_counts.get(Tile.TREE_CANOPY, 0) + 1
+                            # Canopy usually doesn't add new primary resources, handled by trunk
 
                 # Try to place Apple Trees on FOREST_FLOOR or FOREST_HEAVY (rarer)
                 elif (current_tile == Tile.FOREST_FLOOR or current_tile == Tile.FOREST_HEAVY) and apple_tree_noise_map[y][x] > APPLE_TREE_SPAWN_THRESHOLD:
                     decrement_counts(current_tile, original_resource)
 
-                    self.tile_grid_np[y][x] = Tile.APPLE_TREE
-                    self.biome_counts[Tile.APPLE_TREE] = self.biome_counts.get(Tile.APPLE_TREE, 0) + 1
-                    self.resource_counts[ResourceType.APPLES] = self.resource_counts.get(ResourceType.APPLES, 0) + 1
-                    # Apple trees also give wood, so count it if you want, or assume APPLES is primary
-                    # self.resource_counts[ResourceType.WOOD] = self.resource_counts.get(ResourceType.WOOD, 0) + 1 
+                    # Place Apple Tree Trunk
+                    self.tile_grid_np[y][x] = Tile.APPLE_TREE_TRUNK
+                    self.biome_counts[Tile.APPLE_TREE_TRUNK] = self.biome_counts.get(Tile.APPLE_TREE_TRUNK, 0) + 1
+                    # Apple tree trunks provide wood
+                    self.resource_counts[ResourceType.WOOD] = self.resource_counts.get(ResourceType.WOOD, 0) + 1 
+
+                    # Place Apple Tree Leaves above if in bounds
+                    if y + 1 < self.height:
+                        # Check if the tile above is suitable (e.g., not already a trunk or another structure part)
+                        # For simplicity, we'll assume it can overwrite most passable tiles or be placed if it's air-like.
+                        # A more complex check might be `above_tile.metadata.passable` or specific types.
+                        above_tile_original_resource = self.tile_grid_np[y+1][x].metadata.resource_type
+                        decrement_counts(self.tile_grid_np[y+1][x], above_tile_original_resource)
+                        
+                        self.tile_grid_np[y+1][x] = Tile.APPLE_TREE_LEAVES
+                        self.biome_counts[Tile.APPLE_TREE_LEAVES] = self.biome_counts.get(Tile.APPLE_TREE_LEAVES, 0) + 1
+                        self.resource_counts[ResourceType.APPLES] = self.resource_counts.get(ResourceType.APPLES, 0) + 1
 
                 # Try to place Mushroom Patches on FOREST_FLOOR or FOREST_HEAVY
                 elif (current_tile == Tile.FOREST_FLOOR or current_tile == Tile.FOREST_HEAVY) and mushroom_noise_map[y][x] > MUSHROOM_SPAWN_THRESHOLD:
@@ -294,7 +311,7 @@ class MapGenerator:
                 # Try to place Gold Deposits on MOUNTAIN_SLOPE or MOUNTAIN_PEAK (rarely, or deeper in cliffs)
                 elif (current_tile == Tile.MOUNTAIN_SLOPE or current_tile == Tile.MOUNTAIN_PEAK):
                     # DEBUG: Print gold noise value for ALL mountain slope/peak tiles being considered
-                    print(f"GOLD CHECK: Tile ({x},{y}) is {current_tile.name}, Gold Noise: {gold_deposit_noise_map[y][x]:.4f}, Threshold: {GOLD_DEPOSIT_SPAWN_THRESHOLD}")
+                    # print(f"GOLD CHECK: Tile ({x},{y}) is {current_tile.name}, Gold Noise: {gold_deposit_noise_map[y][x]:.4f}, Threshold: {GOLD_DEPOSIT_SPAWN_THRESHOLD}") # DEBUG REMOVED
                     if gold_deposit_noise_map[y][x] > GOLD_DEPOSIT_SPAWN_THRESHOLD:
                         # Gold is rare, ensure it does not overwrite other specific deposits if logic gets more complex
                         decrement_counts(current_tile, original_resource)
