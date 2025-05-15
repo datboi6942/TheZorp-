@@ -255,8 +255,6 @@ class Engine:
             tile_enum = self.map_generator.tile_grid_np[tile_y][tile_x]
             resource_type = tile_enum.metadata.resource_type
             print(f"DEBUG: Spawned Zorp {new_zorp.id} at {new_zorp.position} on tile {tile_enum.name} (resource: {resource_type}) with E: {new_zorp.energy:.1f} Alive: {new_zorp.alive}")
-            # Set high starting energy/hunger for debug
-            new_zorp.energy = 1000.0
         print(f"Successfully spawned {len(self.world.all_zorps)} Zorps into ZorpWorld.")
 
         # Count Zorps in ECS after spawning (This will be 0 for AgentMarker if we removed creation)

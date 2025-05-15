@@ -4,7 +4,7 @@ import numpy as np
 from ..core.zorp import Zorp, DEFAULT_INPUT_SIZE, DEFAULT_OUTPUT_SIZE
 from ..core.brain import ActionType, ActionChoice
 from ..config import GameConfig # To get map dimensions, etc.
-from zorplife.world.tiles import ResourceType
+from zorplife.world.tiles import ResourceType, Tile
 
 # Basic energy costs for actions (can be moved to GameConfig)
 ENERGY_COST_MOVE = 1.0
@@ -13,6 +13,8 @@ ENERGY_COST_REPRODUCE_ATTEMPT = 5.0 # Higher cost even if not successful yet
 ENERGY_COST_EMIT_SIGNAL = 0.2
 ENERGY_COST_REST = 0.0 # Resting might even regain a tiny bit or have a very low cost
 ENERGY_COST_THINK = 0.1 # Base cost for thinking per tick
+
+EDIBLE_RESOURCE_TYPES = [ResourceType.PLANT_MATTER, ResourceType.APPLES, ResourceType.MUSHROOMS, ResourceType.ORGANIC_MATTER]
 
 class ZorpWorld:
     """
@@ -99,6 +101,14 @@ class ZorpWorld:
         x, y = position
         return 0 <= x < self.width and 0 <= y < self.height
 
+    def is_tile_passable_for_zorp(self, position: Tuple[int, int]) -> bool:
+        """Checks if a tile at a given position is passable for a Zorp."""
+        if not self.is_within_bounds(position):
+            return False
+        # Assuming self.map_data stores Tile enums
+        tile_enum: Tile = self.map_data[position[1], position[0]]
+        return tile_enum.metadata.passable
+
     def tick(self) -> None:
         """Advances the world state by one simulation step."""
         zorps_to_remove: List[Zorp] = []
@@ -107,17 +117,21 @@ class ZorpWorld:
                 zorps_to_remove.append(zorp)
                 continue
 
-            # Zorp perceives, thinks, and decides on an action
-            action_choice = zorp.think(self) # 'self' is the ZorpWorld instance
-            print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_before_action: {zorp.energy:.1f} Action: {action_choice.action_type}")
+            # Zorp decides action (can be hunger-driven or NN-driven)
+            # This requires Zorp class to have a 'decide_action' method
+            # and its 'update' method to be renamed or refactored (e.g., to 'passive_update')
+            action_choice = zorp.decide_action(self) # Changed from zorp.think(self)
+            # print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_before_action: {zorp.energy:.1f} Chosen Action: {action_choice.action_type}")
+            print(f"[ZorpWorld tick] Zorp {zorp.id} (E: {zorp.energy:.1f}) decided action: {action_choice.action_type}, Details: {action_choice}")
             
             # Apply the chosen action
             self._apply_action(zorp, action_choice)
-            print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_after_action: {zorp.energy:.1f} Alive_after_action: {zorp.alive}")
+            # print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_after_action: {zorp.energy:.1f} Alive_after_action: {zorp.alive}")
             
-            # Zorp's internal state update (aging, passive energy loss)
-            zorp.update(self) # This already deducts 1 energy for living
-            print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_after_update: {zorp.energy:.1f} Alive_after_update: {zorp.alive}")
+            # Zorp's internal passive state update (aging, base metabolism cost of living)
+            # This requires Zorp.update to be refactored into something like Zorp.passive_update()
+            zorp.passive_update(self) # Changed from zorp.update(self)
+            # print(f"DEBUG ZORPWORLD TICK: Zorp {zorp.id} E_after_passive_update: {zorp.energy:.1f} Alive_after_passive_update: {zorp.alive}")
 
             if not zorp.alive: # Check again if action or update killed it
                 zorps_to_remove.append(zorp)
@@ -136,12 +150,17 @@ class ZorpWorld:
                 dx, dy = action.move_delta
                 new_position = (old_position[0] + dx, old_position[1] + dy)
 
-                if self.is_within_bounds(new_position):
+                if self.is_within_bounds(new_position) and self.is_tile_passable_for_zorp(new_position): # Added passability check
+                    # Check if another Zorp is in the target position
+                    # For now, allow stacking. Could be changed later:
+                    # if not self.get_zorps_at(new_position): 
                     zorp.position = new_position
                     self._update_zorp_spatial_map(zorp, old_position)
                     zorp.energy -= ENERGY_COST_MOVE
+                    # else: # Target tile occupied
+                        # zorp.energy -= ENERGY_COST_MOVE * 0.25 # Small penalty for trying to move into occupied tile
                 else:
-                    # Bumped into wall, penalize slightly or do nothing
+                    # Bumped into wall or impassable terrain
                     zorp.energy -= ENERGY_COST_MOVE * 0.5 # Lesser penalty for failed move
             else:
                 # This case should ideally not happen if MOVE implies a move_delta
@@ -155,14 +174,15 @@ class ZorpWorld:
             
             # Check tile for food
             tile_x, tile_y = zorp.position
-            current_tile_enum = self.map_data[tile_y, tile_x]
+            current_tile_enum: Tile = self.map_data[tile_y, tile_x] # Added type hint
             tile_meta = current_tile_enum.metadata
 
-            # Check if the tile's resource type is something the Zorp can eat (e.g., PLANT_MATTER, APPLES, MUSHROOMS)
+            # Check if the tile's resource type is something the Zorp can eat
             # and if the tile has a defined energy_value > 0
-            if tile_meta.energy_value > 0 and tile_meta.resource_type in [ResourceType.PLANT_MATTER, ResourceType.APPLES, ResourceType.MUSHROOMS, ResourceType.ORGANIC_MATTER]:
+            if tile_meta.energy_value > 0 and tile_meta.resource_type in EDIBLE_RESOURCE_TYPES:
                 energy_gained = tile_meta.energy_value
                 zorp.energy += energy_gained
+                zorp.energy = min(zorp.energy, zorp.max_energy) # Clamp to max energy
                 # print(f"DEBUG: Zorp {zorp.id} ATE {current_tile_enum.name}, gained {energy_gained:.1f} E. Total E: {zorp.energy:.1f}")
                 
                 # Optional: Tile depletion/change logic can go here
@@ -201,11 +221,29 @@ class ZorpWorld:
 
     def get_resources_at(self, position: Tuple[int, int]) -> np.ndarray:
         """
-        Placeholder for getting resource levels at a position.
-        Returns a 3-element array for [plant, mineral, water].
+        Gets resource levels at a position.
+        Returns a 3-element array for [food_metric, water_metric, other_metric].
+        - food_metric: energy value from edible tile, or 0.
+        - water_metric: 1.0 if water tile, 0.0 otherwise.
+        - other_metric: currently 0.0.
         """
-        # TODO: Implement in Stage 5
-        return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        if not self.is_within_bounds(position):
+            return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        tile_enum: Tile = self.map_data[position[1], position[0]]
+        tile_meta = tile_enum.metadata
+
+        food_metric = 0.0
+        if tile_meta.resource_type in EDIBLE_RESOURCE_TYPES and tile_meta.energy_value > 0:
+            food_metric = tile_meta.energy_value
+        
+        water_metric = 0.0
+        if tile_meta.resource_type == ResourceType.WATER:
+            water_metric = 1.0
+            
+        other_metric = 0.0 # Placeholder for other resources like minerals, etc.
+
+        return np.array([food_metric, water_metric, other_metric], dtype=np.float32)
 
     def get_average_signal_near(self, position: Tuple[int, int], radius: int = 5) -> np.ndarray:
         """
