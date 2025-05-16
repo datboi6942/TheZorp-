@@ -1,399 +1,666 @@
 import uuid
-import numpy as np
-from typing import Tuple, Dict, List, Any, TYPE_CHECKING, Optional
-import random
+from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING, Set # Added Set
+import random # For random lifespan
+import numpy as np # For brain inputs/outputs
 
-from .brain import ZorpBrain, ActionType, ActionChoice # Assuming brain.py is in the same directory
-# from ..config import GameConfig # Would be ideal for default sizes
+from ..agents.components import Position, Energy, Age, Genetics, Inventory
+from ..world.tiles import Tile, ResourceType
+# from ..config import GameConfig # Would be ideal for default sizes, if GameConfig is accessible here
+from ..core.brain import ActionType, ActionChoice
 
+# Default values for brain, if not overridden by Zorp's genome or __init__
+DEFAULT_INPUT_SIZE = 10  # Example: proximity sensors, internal state
+DEFAULT_HIDDEN_SIZE = 8
+DEFAULT_OUTPUT_SIZE = 5 # Example: move_x, move_y, eat, sleep, emit_signal_strength
+
+MAX_ENERGY = 100.0  # Default max energy
+HUNGER_THRESHOLD_PERCENT = 0.5 # Eat if energy < 50% of max_energy
+
+# Forward declaration for ZorpWorld
 if TYPE_CHECKING:
-    from ..world.world import ZorpWorld # Forward reference for type hinting
+    from .world import ZorpWorld # Corrected import path assuming world.py is in the same directory (core)
 
-# Default brain dimensions - these could come from GameConfig
-DEFAULT_INPUT_SIZE = 8  # 1 entropy + 3 resources + 4 signals
-DEFAULT_HIDDEN_SIZE = 16 # Configurable width
-DEFAULT_OUTPUT_SIZE = 11 # 5 action_type_logits + 2 move_params + 4 signal_params
-
-HUNGER_THRESHOLD_PERCENT = 0.5 # Zorp seeks food if energy is below 50% of max (assuming max is initial energy)
-MAX_ENERGY = 100.0 # Assuming this is the default starting energy, can be configured
 
 class Zorp:
-    """
-    Represents an agent in the ZorpLife simulation.
+    """Represents a Zorp agent in the simulation.
+
+    Combines ECS-like components for state with its own methods for behavior.
+    The genome now dictates behavioral parameters rather than a full neural network structure initially.
     """
     def __init__(
         self,
         position: Tuple[int, int],
-        energy: float = 100.0,
-        genome: Optional[Dict[str, List[np.ndarray]]] = None,
-        age: int = 0,
-        lineage_id: Optional[str] = None,
-        input_size: int = DEFAULT_INPUT_SIZE,
-        hidden_size: int = DEFAULT_HIDDEN_SIZE,
-        output_size: int = DEFAULT_OUTPUT_SIZE,
+        world_ref: Optional['ZorpWorld'] = None,
+        energy_component: Optional[Energy] = None, # Renamed for clarity
+        age_component: Optional[Age] = None,       # Renamed for clarity
+        genetics_component: Optional[Genetics] = None, # Renamed for clarity
+        inventory_component: Optional[Inventory] = None, # Renamed for clarity
+        genome_dict: Optional[Dict[str, Any]] = None, # Renamed for clarity
+        # Parameters for a potential neural network brain (can be part of genome_dict too)
+        # input_size: int = DEFAULT_INPUT_SIZE,
+        # hidden_size: int = DEFAULT_HIDDEN_SIZE,
+        # output_size: int = DEFAULT_OUTPUT_SIZE,
     ):
-        """
-        Initializes a Zorp instance.
-
-        Args:
-            position: The (x, y) coordinates of the Zorp.
-            energy: The current energy level of the Zorp.
-            genome: The genetic makeup of the Zorp, defining its brain's weights and biases.
-                    If None, a random genome is generated.
-            age: The age of the Zorp in ticks.
-            lineage_id: An identifier for tracking family trees.
-            input_size: The number of inputs for the Zorp's brain.
-            hidden_size: The number of hidden neurons in the Zorp's brain.
-            output_size: The number of outputs from the Zorp's brain.
-        """
-        self.id: str = str(uuid.uuid4())
-        self.position: Tuple[int, int] = position
-        self.energy: float = energy
-        self.age: int = age
+        self.id: uuid.UUID = uuid.uuid4() # Changed from str to uuid.UUID
+        self.position: Tuple[int, int] = position # Tile coordinates (x, y)
+        
+        # Initialize components
+        self.energy: Energy = energy_component if energy_component is not None else Energy(hunger=random.uniform(50, 100), sleepiness=0.0)
+        self.age: Age = age_component if age_component is not None else Age(current_age=0.0, lifespan=random.uniform(60, 100))
+        self.genetics: Genetics = genetics_component if genetics_component is not None else Genetics()
+        self.inventory: Inventory = inventory_component if inventory_component is not None else Inventory()
+        
         self.alive: bool = True
-        self.lineage_id: str = lineage_id if lineage_id else self.id
-        self.max_energy: float = MAX_ENERGY # Store max energy for threshold calculation
+        self.max_energy: float = MAX_ENERGY # Use defined constant
+        self.world_ref: Optional['ZorpWorld'] = world_ref
+        
+        # Genome for behavioral parameters
+        self.genome: Dict[str, Any] = genome_dict if genome_dict is not None else self._initialize_default_genome_parameters()
 
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
+        # Behavioral state (initialized here, within __init__)
+        self.current_action: Optional[str] = None # e.g., "eating", "sleeping", "wandering"
+        self.action_target: Any = None # e.g., target Zorp for mating, tile for food
+        self.action_progress: float = 0.0 # For actions that take time
 
-        if genome is None:
-            self.genome = self._generate_random_genome()
+        # Memory for food locations
+        self.known_food_locations: Set[Tuple[int, int]] = set() # (x, y) coordinates
+
+        # Communication related (placeholders for future development)
+        self.known_words: Dict[str, Any] = {} # word: concept_representation
+        self.last_communication_time: float = 0.0 # Game time of last communication
+
+        # Sexual reproduction intent (None if not seeking, else partner's UUID)
+        self.pending_reproduction_with: Optional[uuid.UUID] = None
+
+        # If a neural network brain is to be used, it would be initialized here,
+        # possibly using parameters from self.genome or dedicated __init__ args.
+        # self.brain = ZorpBrain(input_size, hidden_size, output_size, genome_for_brain)
+        # For now, behavior is rule-based using self.genome parameters.
+
+    def _initialize_default_genome_parameters(self) -> Dict[str, Any]:
+        """Initializes a basic genome with default behavioral parameters."""
+        return {
+            "metabolic_rate_hunger": random.uniform(0.015, 0.035),
+            "metabolic_rate_sleep": random.uniform(0.05, 0.15),
+            "reproduction_energy_threshold": 20.0,
+            "min_reproduction_age": 5.0,  # Lowered for testing
+            "max_reproduction_age": 100.0,
+            "reproduction_cooldown": 3.0,  # Cooldown is currently bypassed in can_reproduce for debugging
+            "hunger_threshold_for_eating": random.uniform(30.0, self.max_energy * HUNGER_THRESHOLD_PERCENT),
+            "sleepiness_threshold_for_sleeping": random.uniform(70.0, 90.0),
+            "preferred_food_types": [
+                ResourceType.APPLES,
+                ResourceType.MUSHROOMS
+            ],
+            "eating_energy_gain": 50.0,
+            "perception_radius": random.uniform(3, 7),
+            "mutation_rate": 0.05,
+            "lifespan_min": 30.0,  # Increased
+            "lifespan_max": 150.0, # Increased
+            "combat_proficiency": { # Placeholder for future combat mechanics
+                "attack_power": random.uniform(5.0, 15.0),
+                "defense_value": random.uniform(3.0, 10.0),
+            },
+        }
+
+    def passive_update(self, dt: float) -> None:
+        """Updates the Zorp's age and metabolic needs based on genome parameters."""
+        if not self.alive: return
+
+        self.age.current_age += dt
+        self.energy.hunger -= self.genome.get("metabolic_rate_hunger", 0.5) * dt
+        self.energy.sleepiness += self.genome.get("metabolic_rate_sleep", 0.3) * dt
+        self.energy.sleepiness = min(self.energy.sleepiness, 100.0) # Cap sleepiness
+
+        if self.energy.hunger <= 0 or \
+           self.age.current_age >= self.age.lifespan or \
+           self.energy.sleepiness >= 100:
+            self.die()
+
+    def die(self) -> None:
+        """Marks the Zorp as dead and notifies the world."""
+        if not self.alive: return
+        self.alive = False
+        death_reason = "unknown"
+        if self.energy.hunger <= 0: death_reason = "starvation"
+        elif self.energy.sleepiness >= 100: death_reason = "exhaustion"
+        elif self.age.current_age >= self.age.lifespan: death_reason = "old age"
+        
+        # Try to get a short genetic ID for logging, if the method exists
+        genetic_id_short = "N/A"
+        if hasattr(self.genetics, 'genetic_id') and self.genetics.genetic_id and hasattr(self.genetics.genetic_id, 'hex'):
+            genetic_id_short = self.genetics.genetic_id.hex[:8]
+        
+        print(f"Zorp {self.id} ({genetic_id_short}) died of {death_reason} at ({self.position[0]},{self.position[1]}) age {self.age.current_age:.2f}.")
+        if self.world_ref:
+            self.world_ref.handle_zorp_death(self)
+
+    def can_reproduce(self, current_game_time: float) -> bool:
+        """Checks if the Zorp is currently able to reproduce based on genome and world state."""
+        # Moved print upfront for better debugging if early exit
+        print(f"[REPRODUCE DEBUG ENTRY] Zorp {self.id} attempting can_reproduce. Alive: {self.alive}, WorldRef: {'SET' if self.world_ref else 'NONE'}. Current Game Time: {current_game_time:.2f}")
+
+        if not self.alive or not self.world_ref:
+            print(f"[REPRODUCE DEBUG EXIT] Zorp {self.id} cannot reproduce: not alive or no world_ref.")
+            return False
+        
+        # --- RE-ENABLE ACTUAL COOLDOWN LOGIC ---
+        # cooldown_passed = True # DEBUG BYPASS
+        # print(f"[REPRODUCE DEBUG COOLDOWN] Zorp {self.id}: Cooldown check bypassed, cooldown_passed forced to True for debugging.") # DEBUG BYPASS
+        last_reproduction_time = self.world_ref.get_last_reproduction_time(self.id)
+        cooldown_passed = True
+        if last_reproduction_time is not None:
+            reproduction_cooldown_duration = self.genome.get("reproduction_cooldown", 10.0)
+            if current_game_time - last_reproduction_time < reproduction_cooldown_duration:
+                cooldown_passed = False
+                print(f"[REPRODUCE DEBUG COOLDOWN] Zorp {self.id}: Cooldown NOT passed. Last repro: {last_reproduction_time:.2f}, current: {current_game_time:.2f}, needed: {reproduction_cooldown_duration:.1f}")
+            else:
+                print(f"[REPRODUCE DEBUG COOLDOWN] Zorp {self.id}: Cooldown PASSED. Last repro: {last_reproduction_time:.2f}, current: {current_game_time:.2f}, needed: {reproduction_cooldown_duration:.1f}")
         else:
-            self.genome = genome
+            print(f"[REPRODUCE DEBUG COOLDOWN] Zorp {self.id}: No last reproduction time found, cooldown PASSED by default.")
+        # --- END COOLDOWN LOGIC ---
 
-        self.brain: ZorpBrain = ZorpBrain(
-            genome=self.genome,
-            input_size=self.input_size,
-            hidden_size=self.hidden_size,
-            output_size=self.output_size,
-        )
-        self.current_signal: np.ndarray = np.zeros(4) # float[4] for emitted signal
-
-    def _generate_random_genome(self) -> Dict[str, List[np.ndarray]]:
-        """Generates a random genome (weights and biases) for the ZorpBrain."""
-        W1 = np.random.randn(self.input_size, self.hidden_size).astype(np.float32) * 0.1
-        B1 = np.zeros((self.hidden_size,), dtype=np.float32)
-        W2 = np.random.randn(self.hidden_size, self.output_size).astype(np.float32) * 0.1
-        B2 = np.zeros((self.output_size,), dtype=np.float32)
-        return {"weights": [W1, W2], "biases": [B1, B2]}
-
-    def perceive(self, world: 'ZorpWorld') -> np.ndarray:
-        """
-        Gathers sensory information from the environment.
-        This is a placeholder implementation.
-
-        Args:
-            world: The ZorpWorld instance providing environmental data.
-
-        Returns:
-            A NumPy array representing the Zorp's perception vector.
-            Expected elements: [local_entropy, resource1, resource2, resource3, sig1, sig2, sig3, sig4]
-        """
-        perception_vector = np.zeros(self.input_size, dtype=np.float32)
+        # Match world logic: must have at least 30% of max energy
+        energy_threshold = self.max_energy * 0.3
+        energy_ok = self.energy.hunger >= energy_threshold
         
-        # Placeholder for local_entropy
-        perception_vector[0] = 0.0 # world.get_local_entropy(self.position)
+        min_age = self.genome.get("min_reproduction_age", 15.0)
+        max_age = self.genome.get("max_reproduction_age", 80.0)
+        age_ok = min_age <= self.age.current_age <= max_age
         
-        # Placeholder for resource_presence (e.g., plant, mineral, water)
-        # For now, 3 elements for resources. Actual implementation in Stage 5.
-        perception_vector[1:4] = world.get_resources_at(self.position) # This returns np.zeros(3) currently
+        can_repro = energy_ok and age_ok and cooldown_passed # cooldown_passed is now always true for this test
         
-        # Wall sensors (N, E, S, W)
-        # This will use perception_vector[4], [5], [6], [7]
-        wall_sensors = world.get_wall_sensor_vector(self.position)
-        perception_vector[4:8] = wall_sensors
-        
-        return perception_vector
+        # Original detailed print, now we can see if it's reached
+        print(f"[REPRODUCE DEBUG EVAL] Zorp {self.id}: energy={self.energy.hunger:.1f} (actual_thresh={energy_threshold:.1f}), age={self.age.current_age:.1f} (range={min_age:.1f}-{max_age:.1f}), current_cooldown_passed_value={cooldown_passed}, energy_ok={energy_ok}, age_ok={age_ok}, FINAL can_reproduce_result={can_repro}")
+        return can_repro
 
-    def _softmax(self, x: np.ndarray) -> np.ndarray:
-        """Numerically stable softmax function."""
-        e_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
-        return e_x / np.sum(e_x, axis=-1, keepdims=True)
+    def attempt_eat_from_inventory(self) -> bool:
+        """Attempts to eat food from inventory. Returns True if successful."""
+        if not self.alive:
+            return False
 
-    def think(self, world: 'ZorpWorld', allow_log: bool) -> ActionChoice:
-        """
-        Uses the ZorpBrain to decide on an action based on perception.
+        preferred_foods = self.genome.get("preferred_food_types", [])
+        hunger_trigger = self.genome.get("hunger_threshold_for_eating", self.max_energy * 0.4)
+        ate = False
+        # Eat as long as we have food and are below the hunger threshold
+        while self.inventory.carrying in preferred_foods and self.inventory.amount > 0 and self.energy.hunger < hunger_trigger:
+            eaten_food_type = self.inventory.carrying
+            energy_gain = self.genome.get("eating_energy_gain", 50.0)
+            self.energy.hunger = min(self.max_energy, self.energy.hunger + energy_gain)
+            self.inventory.amount -= 1
+            ate = True
+            print(f"[EAT] Zorp {self.id} ate {eaten_food_type.name if eaten_food_type else 'something'} from inventory. Hunger: {self.energy.hunger:.1f}")
+            if self.inventory.amount == 0:
+                self.inventory.carrying = None
+        if ate:
+            self.current_action = None  # Reset action after eating
+        return ate
 
-        Args:
-            world: The ZorpWorld instance to perceive from.
-            allow_log: Boolean flag to enable/disable logging for this tick.
-
-        Returns:
-            An ActionChoice object representing the Zorp's decided action.
-        """
-        perception_vector = self.perceive(world)
-        raw_nn_output = self.brain.forward(perception_vector)
-
-        action_logits = raw_nn_output[0:5]
-        action_probabilities = self._softmax(action_logits)
-        
-        # Choose action stochastically based on probabilities
-        action_type_idx = np.random.choice(len(ActionType), p=action_probabilities)
-        chosen_action_type = list(ActionType)[action_type_idx]
-
-        move_delta: Optional[Tuple[int, int]] = None
-        signal_vector: Optional[np.ndarray] = None
-
-        if chosen_action_type == ActionType.MOVE:
-            # move_params are raw_nn_output[5:7], already tanh'd in brain's forward pass
-            move_params = raw_nn_output[5:7]
-            # Discretize to -1, 0, or 1
-            dx = int(np.round(move_params[0]))
-            dy = int(np.round(move_params[1]))
-            # Ensure they are within bounds if necessary, e.g. sum of abs values <= 1 for pure cardinal/diagonal
-            # For now, direct rounding is fine. Can refine to ensure valid single-step moves.
-            if dx == 0 and dy == 0:
-                 # If move results in no change, force a random 1-step move.
-                 # This ensures that if the NN decides to move, it actually moves.
-                if allow_log:
-                    print(f"[Zorp {self.id} think] NN chose MOVE but delta was (0,0). Forcing random 1-step move.")
-                possible_moves = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-                chosen_move_idx = np.random.choice(len(possible_moves))
-                dx, dy = possible_moves[chosen_move_idx]
-            move_delta = (dx, dy)
-        
-        elif chosen_action_type == ActionType.EMIT_SIGNAL:
-            # signal_params are raw_nn_output[7:11], already tanh'd in brain's forward pass
-            signal_params = raw_nn_output[7:11]
-            signal_vector = signal_params # These are floats in [-1, 1]
-            self.current_signal = signal_vector # Update Zorp's own last emitted signal
-
-        result_action_choice = ActionChoice(
-            action_type=chosen_action_type,
-            move_delta=move_delta,
-            signal_vector=signal_vector
-        )
-        if allow_log:
-            print(f"[Zorp {self.id} think] NN chose action: {chosen_action_type}, Details: {result_action_choice}")
-        return result_action_choice
+    def attempt_sleep(self) -> None:
+        """Zorp sleeps to reduce sleepiness instantly."""
+        if not self.alive: return
+        self.energy.sleepiness = 0.0
+        print(f"Zorp {self.id} slept. Sleepiness: {self.energy.sleepiness:.1f}")
+        self.current_action = None # Reset action after sleeping
 
     def decide_action(self, world: 'ZorpWorld', allow_log: bool) -> ActionChoice:
-        """
-        Decides the Zorp's next action based on its state (e.g., hunger) or brain.
-        This is the main decision-making entry point called by ZorpWorld.tick().
-        
-        Args:
-            world: The ZorpWorld instance.
-            allow_log: Boolean flag to enable/disable logging for this tick.
-        """
-        hunger_trigger_value = self.max_energy * HUNGER_THRESHOLD_PERCENT
-        if allow_log:
-            print(f"[Zorp {self.id} decide_action] Energy: {self.energy:.1f}/{self.max_energy:.1f}, Hunger Threshold: < {hunger_trigger_value:.1f}")
-
-        # Hybrid Behavior:
-        # 1. Hardcoded: Seek food if hungry
-        if self.energy < hunger_trigger_value:
-            if allow_log:
-                print(f"[Zorp {self.id} decide_action] Hungry. Calling seek_food().")
-            action = self.seek_food(world, allow_log)
-        # 2. Emergent: Otherwise, use the neural network
-        else:
-            if allow_log:
-                print(f"[Zorp {self.id} decide_action] Not hungry. Calling think().")
-            action = self.think(world, allow_log) # Pass allow_log to think method
-        
-        if allow_log:
-            print(f"[Zorp {self.id} decide_action] Chosen action: {action.action_type}, Details: {action}")
-        return action
-
-    def passive_update(self, world: 'ZorpWorld') -> None:
-        """
-        Handles passive updates to the Zorp's state each tick (e.g., aging, base metabolism).
-        Called by ZorpWorld.tick() after an action has been chosen and applied.
+        """Decides the Zorp's next action based on needs and genome, returns an ActionChoice for the world to apply.
 
         Args:
             world: The ZorpWorld instance.
+            allow_log: Whether to print debug info.
+        Returns:
+            ActionChoice: The action the Zorp intends to take.
         """
         if not self.alive:
-            return
+            self.current_action = "dead"
+            return ActionChoice(action_type=ActionType.REST)
 
-        # Basic energy consumption for existing (cost of living)
-        self.energy -= 0.2 # Lowered base cost for slower energy drain
-        if self.energy <= 0:
-            self.alive = False
-            # print(f"Zorp {self.id} starved during passive_update.")
-            return
+        # FORCE REPRODUCTION PRIORITY FOR DEBUGGING
+        # Add a new debug log here to see what decide_action thinks about can_reproduce
+        can_repro_result_for_decide_action = False
+        if self.world_ref: # Check world_ref first to avoid error if it's None
+            can_repro_result_for_decide_action = self.can_reproduce(self.world_ref.current_game_time)
         
-        self.age += 1
+        print(f"[DECIDE_ACTION REPRO CHECK] Zorp {self.id}: self.world_ref is {'SET' if self.world_ref else 'NONE'}. self.can_reproduce() returned: {can_repro_result_for_decide_action} at game time {self.world_ref.current_game_time if self.world_ref else 'N/A'}.")
 
-    def seek_food(self, world: 'ZorpWorld', allow_log: bool) -> ActionChoice:
+        if self.world_ref and can_repro_result_for_decide_action: # Use the pre-calculated result
+            self.current_action = "seeking_mate" # This might be misnomer for asexual
+            print(f"[REPRODUCE DEBUG] Zorp {self.id} is eligible and is choosing to reproduce (from decide_action).")
+            if allow_log:
+                print(f"[Zorp {self.id} decide_action DEBUG] Action: ActionChoice(action_type=ActionType.REPRODUCE) (Reason: Eligible for reproduction)")
+            # --- SEXUAL REPRODUCTION LOGIC ---
+            # Scan adjacent tiles for eligible partner
+            x, y = self.position
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if not world.is_within_bounds((nx, ny)):
+                        continue
+                    for partner in world.get_zorps_at((nx, ny)):
+                        if (
+                            partner.id != self.id and
+                            partner.can_reproduce(world.current_game_time) and
+                            partner.pending_reproduction_with is None
+                        ):
+                            # Mutual intent: set both pending_reproduction_with
+                            self.pending_reproduction_with = partner.id
+                            partner.pending_reproduction_with = self.id
+                            self.current_action = "seeking_mate"
+                            if allow_log:
+                                print(f"[REPRODUCE DEBUG] Zorp {self.id} and {partner.id} mutually selected for reproduction.")
+                            return ActionChoice(action_type=ActionType.REPRODUCE, partner_id=partner.id)
+            # If no partner found, do not reproduce this tick
+            return ActionChoice(action_type=ActionType.REPRODUCE)
+
+        # Priority 1: Sleep if exhausted
+        if self.energy.sleepiness >= self.genome.get("sleepiness_threshold_for_sleeping", 80.0):
+            self.current_action = "sleeping"
+            action_to_take = ActionChoice(action_type=ActionType.REST)
+            if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Exhausted)")
+            return action_to_take
+
+        # Priority 1.5: Critically Low Energy Handling
+        emergency_rest_threshold = self.genome.get("emergency_rest_threshold_factor", 0.15) * self.max_energy
+        is_critically_low_energy = self.energy.hunger < emergency_rest_threshold
+
+        preferred_foods = self.genome.get("preferred_food_types", [])
+        has_food_in_inventory = self.inventory.carrying in preferred_foods and self.inventory.amount > 0
+
+        if is_critically_low_energy:
+            if has_food_in_inventory:
+                self.current_action = "eating_from_inventory_critical"
+                action_to_take = ActionChoice(action_type=ActionType.EAT)
+                if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Critically Low Energy {self.energy.hunger:.1f}/{emergency_rest_threshold:.1f} BUT has food)")
+                return action_to_take
+            else:
+                self.current_action = "emergency_resting"
+                action_to_take = ActionChoice(action_type=ActionType.REST)
+                if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Critically Low Energy {self.energy.hunger:.1f}/{emergency_rest_threshold:.1f} AND no food)")
+                return action_to_take
+
+        # Priority 2: Eat if hungry and has food (standard hunger, not critical)
+        hunger_trigger = self.genome.get("hunger_threshold_for_eating", self.max_energy * 0.4)
+        if self.energy.hunger < hunger_trigger: # This implies not critically low, or critical case handled above
+            if has_food_in_inventory:
+                self.current_action = "eating_from_inventory"
+                action_to_take = ActionChoice(action_type=ActionType.EAT)
+                if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Hungry with Food)")
+                return action_to_take
+            else: # Hungry but no food in inventory
+                # Check current tile for preferred food BEFORE deciding to move/forage
+                current_tile_enum: Tile = world.map_data[self.position[1], self.position[0]]
+                current_tile_resource_type = current_tile_enum.metadata.resource_type
+                # Get food_metric, water_metric, other_metric from world.get_resources_at()
+                # world.get_resources_at() uses self.resource_energy_map for food_metric.
+                current_tile_resource_info = world.get_resources_at(self.position, verbose=False) 
+                food_metric_on_tile = current_tile_resource_info[0]
+                actual_energy_on_tile_from_map = world.resource_energy_map[self.position[1], self.position[0]]
+
+                if allow_log:
+                    log_msg = (
+                        f"[Zorp {self.id} decide_action - Tile Check for PICK_UP] "
+                        f"Pos: {self.position}, TileName: {current_tile_enum.name}, "
+                        f"TileResource: {current_tile_resource_type.name if current_tile_resource_type else 'None'}, "
+                        f"InPreferredFood: {current_tile_resource_type in preferred_foods}, "
+                        f"FoodMetric (from get_resources_at): {food_metric_on_tile:.2f}, "
+                        f"ActualEnergyInMap: {actual_energy_on_tile_from_map:.2f}"
+                    )
+                    print(log_msg)
+                    if current_tile_resource_type in preferred_foods:
+                        print(f"[FOOD RECOGNITION] Zorp {self.id} recognizes {current_tile_resource_type.name} as food on tile {self.position}.")
+
+                if current_tile_resource_type in preferred_foods and food_metric_on_tile > 0: # food_metric from get_resources_at()
+                    # If inventory is empty or carrying something different, try to pick up
+                    if self.inventory.carrying is None or self.inventory.carrying != current_tile_resource_type:
+                        self.current_action = "picking_up_food"
+                        action_to_take = ActionChoice(action_type=ActionType.PICK_UP)
+                        if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Hungry, no food in inv, found {current_tile_resource_type.name} on current tile {self.position} with food_metric > 0)")
+                        return action_to_take
+                    # If already carrying the same type, and it's stackable (not implemented yet), could pick up more
+                    # For now, if carrying same type, will proceed to foraging/moving to find a new spot or eat existing
+
+                # Priority 3: Forage (Move to find food)
+                self.current_action = "foraging"
+                
+                # Step 1: Try to find food from memory
+                known_food_direction = self.get_direction_to_nearest_known_food(world)
+
+                if known_food_direction:
+                    dx, dy = known_food_direction
+                    target_x, target_y = self.position[0] + dx, self.position[1] + dy
+                    # Check if the target tile is within bounds and passable
+                    if world.is_within_bounds((target_x, target_y)):
+                        target_tile_enum = world.map_data[target_y, target_x]
+                        if target_tile_enum.metadata.passable:
+                            print(f"[MEMORY USE] Zorp {self.id} moving toward remembered food at ({target_x},{target_y}) from memory. Memory size: {len(self.known_food_locations)}")
+                            action_to_take = ActionChoice(action_type=ActionType.MOVE, move_delta=(dx, dy))
+                            if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Foraging - moving towards KNOWN food at {target_x},{target_y} from memory)")
+                            return action_to_take
+                        else:
+                            # Not passable, remove from memory
+                            if (target_x, target_y) in self.known_food_locations:
+                                self.known_food_locations.remove((target_x, target_y))
+                                print(f"[MEMORY REMOVE] Zorp {self.id} removed unreachable food at ({target_x},{target_y}) (blocked). Memory size: {len(self.known_food_locations)}")
+                    else:
+                        # Out of bounds, remove from memory
+                        if (target_x, target_y) in self.known_food_locations:
+                            self.known_food_locations.remove((target_x, target_y))
+                            print(f"[MEMORY REMOVE] Zorp {self.id} removed unreachable food at ({target_x},{target_y}) (OOB). Memory size: {len(self.known_food_locations)}")
+                    # After removal, try again next tick
+                    # Fall through to foraging scan if no valid memory move
+                else:
+                    # Step 2: No known food in memory or all known spots are now empty, actively scan surroundings
+                    if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] No suitable food in memory. Actively scanning...")
+                    food_direction = self.find_nearest_food_direction(world) # This will also update memory
+
+                    if food_direction:
+                        dx, dy = food_direction
+                        action_to_take = ActionChoice(action_type=ActionType.MOVE, move_delta=(dx, dy))
+                        if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Foraging - moving towards NEWLY SEEN food at {food_direction})")
+                        return action_to_take
+                    else:
+                        # No food found by scanning either, fall back to original foraging behavior (rest or random move)
+                        if random.random() < 0.20: # 20% chance to rest (more aggressive foraging)
+                            action_to_take = ActionChoice(action_type=ActionType.REST)
+                            if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Foraging - no food in sight or memory, decided to rest due to 20% chance)")
+                            return action_to_take
+                        else:
+                            # Random exploratory move
+                            dx = random.choice([-1, 0, 1])
+                            dy = random.choice([-1, 0, 1])
+                            if dx == 0 and dy == 0: # Avoid null move costing energy
+                                action_to_take = ActionChoice(action_type=ActionType.REST)
+                                if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Foraging - no food, null random move (0,0), defaulting to REST)")
+                                return action_to_take
+                            action_to_take = ActionChoice(action_type=ActionType.MOVE, move_delta=(dx, dy))
+                            if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Foraging - no food in sight or memory, random exploration)")
+                            return action_to_take
+        
+        # Priority 4: Wander if not sleepy or hungry enough to eat/forage
+        self.current_action = "wandering"
+        # Add a chance to rest instead of always moving
+        if random.random() < 0.60: # Was 0.33: 60% chance to rest
+            action_to_take = ActionChoice(action_type=ActionType.REST)
+            if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Wandering, but decided to rest due to 60% chance)")
+            return action_to_take
+
+        # Wandering implies movement, generate a random move_delta
+        dx = random.choice([-1, 0, 1])
+        dy = random.choice([-1, 0, 1])
+        if dx == 0 and dy == 0: # Avoid null move costing energy
+            action_to_take = ActionChoice(action_type=ActionType.REST)
+            if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Wandering, null move (0,0) chosen, defaulting to REST)")
+            return action_to_take
+            
+        action_to_take = ActionChoice(action_type=ActionType.MOVE, move_delta=(dx, dy))
+        if allow_log: print(f"[Zorp {self.id} decide_action DEBUG] Action: {action_to_take} (Reason: Wandering)")
+        return action_to_take
+
+    def execute_action(self, dt: float) -> None:
+        """Executes the Zorp's current action."""
+        if not self.alive or not self.current_action or not self.world_ref:
+            return
+
+        action_handlers = {
+            "sleeping": self.attempt_sleep,
+            "eating_from_inventory": self.attempt_eat_from_inventory,
+            "foraging": lambda: None, # ForagingSystem will handle the actual foraging action. Zorp just signals intent.
+            "wandering": lambda: self._wander(dt),
+            "dropping_item": self.attempt_drop_item, # Added drop action handler
+            # "seeking_mate": lambda: self._wander(dt), # Wander while seeking mate for now
+            "dead": lambda: None
+        }
+
+        handler = action_handlers.get(self.current_action)
+        if handler:
+            handler()
+        else:
+            print(f"Warning: Zorp {self.id} has unknown action: {self.current_action}. Defaulting to wander.")
+            self._wander(dt)
+
+    def _wander(self, dt: float) -> None:
+        """Simple random walk movement for one step."""
+        if not self.world_ref or not self.world_ref.map_data or not self.world_ref.map_generator: return
+
+        dx = random.choice([-1, 0, 1])
+        dy = random.choice([-1, 0, 1])
+        if dx == 0 and dy == 0: return # No movement
+
+        new_x = self.position[0] + dx
+        new_y = self.position[1] + dy
+
+        if 0 <= new_x < self.world_ref.map_generator.width and \
+           0 <= new_y < self.world_ref.map_generator.height:
+            if self.world_ref.is_tile_passable(new_x, new_y):
+                self.position = (new_x, new_y)
+
+    def get_render_details(self) -> Dict[str, Any]:
+        """Returns a dictionary of details needed for rendering."""
+        return {
+            "id": str(self.id), # Keep as string for dict keys in RenderSystem
+            "position": self.position,
+            "energy": self.energy.hunger,
+            "max_energy": self.max_energy,
+            "alive": self.alive,
+            "carrying_item": self.inventory.carrying is not None and self.inventory.amount > 0,
+            "carrying_type_name": self.inventory.carrying.name if (self.inventory.carrying and self.inventory.amount > 0) else None
+        }
+
+    # --- Placeholder communication methods ---
+    def generate_sound_for_concept(self, concept: str) -> Any:
+        # Actual sound generation/selection would go here
+        return f"sound_for_{concept}" 
+
+    def communicate(self, message_concept: str, target: Optional['Zorp'] = None) -> None:
+        if not self.alive or not self.world_ref: return
+        
+        sound = self.generate_sound_for_concept(message_concept)
+        # In a real implementation, this would interact with an audio system
+        print(f"Zorp {self.id} communicates '{message_concept}' (sound: {sound})")
+        self.last_communication_time = self.world_ref.current_game_time
+
+    def __repr__(self) -> str:
+        return (f"Zorp(id={str(self.id)[:8]}, pos={self.position}, "
+                f"hunger={self.energy.hunger:.1f}, sleep={self.energy.sleepiness:.1f}, "
+                f"age={self.age.current_age:.1f}/{self.age.lifespan:.0f}, "
+                f"alive={self.alive}, inv_item={self.inventory.carrying.name if self.inventory.carrying else 'None'}({self.inventory.amount}), "
+                f"action='{self.current_action}')")
+
+    def attempt_drop_item(self) -> bool:
+        """Attempts to drop the carried item onto the current tile.
+
+        Returns:
+            bool: True if the item was successfully dropped, False otherwise.
         """
-        Hardcoded behavior to find and move towards the nearest food source, or eat if already on food.
-        Scans a 5x5 area around the Zorp.
+        if not self.alive or not self.world_ref or not self.world_ref.map_generator:
+            return False
+
+        if self.inventory.carrying is None or self.inventory.amount == 0:
+            print(f"Zorp {self.id} tried to drop an item but has an empty inventory.")
+            self.current_action = None # Nothing to drop
+            return False
+
+        carried_resource_type = self.inventory.carrying
+        tile_x, tile_y = self.position
+
+        # Ensure position is valid before accessing map_data
+        if not (0 <= tile_y < self.world_ref.map_generator.height and 0 <= tile_x < self.world_ref.map_generator.width):
+            print(f"Zorp {self.id} at invalid position ({tile_x},{tile_y}) cannot drop item.")
+            self.current_action = "wandering" # Or None
+            return False
+            
+        current_tile_on_ground = self.world_ref.map_data[tile_y, tile_x]
+
+        # Define which tiles are suitable for dropping items on
+        droppable_on_tiles = [Tile.GRASS, Tile.DIRT]
+        if current_tile_on_ground not in droppable_on_tiles:
+            print(f"Zorp {self.id} cannot drop {carried_resource_type.name} on {current_tile_on_ground.name} at ({tile_x},{tile_y}). Tile not suitable.")
+            # Maybe change action to wander to find a suitable spot
+            self.current_action = "wandering" 
+            return False
+
+        # Mapping from ResourceType being carried to the Tile it becomes when dropped.
+        # This simplifies things by reusing existing resource-providing tiles.
+        # TODO: Consider creating specific "ITEM_ON_GROUND" tiles if needed.
+        resource_to_tile_map: Dict[ResourceType, Optional[Tile]] = {
+            ResourceType.APPLES: Tile.APPLE_TREE_LEAVES, # Changed FRUIT to APPLES, and target to APPLE_TREE_LEAVES (harvestable part)
+            ResourceType.MUSHROOMS: Tile.MUSHROOM_PATCH,
+            ResourceType.ORGANIC_MATTER: Tile.ORGANIC_REMAINS,
+            # Other resources might not be 'droppable' by Zorps in this way
+        }
+
+        new_tile_to_place = resource_to_tile_map.get(carried_resource_type)
+
+        if new_tile_to_place is None:
+            print(f"Zorp {self.id} is carrying {carried_resource_type.name}, which has no defined dropped tile. Cannot drop.")
+            self.inventory.carrying = None # Discard the item if it's undroppable? Or Zorp keeps carrying?
+            self.inventory.amount = 0
+            self.current_action = None
+            return False
+        
+        # Proceed with dropping the item
+        # 1. Decrement counts for the tile being replaced (current_tile_on_ground)
+        old_resource_on_ground = current_tile_on_ground.metadata.resource_type
+        if current_tile_on_ground in self.world_ref.map_generator.biome_counts:
+            self.world_ref.map_generator.biome_counts[current_tile_on_ground] -= 1
+            if self.world_ref.map_generator.biome_counts[current_tile_on_ground] == 0:
+                del self.world_ref.map_generator.biome_counts[current_tile_on_ground]
+        
+        if old_resource_on_ground != ResourceType.NONE and old_resource_on_ground in self.world_ref.map_generator.resource_counts:
+            self.world_ref.map_generator.resource_counts[old_resource_on_ground] -= 1
+            if self.world_ref.map_generator.resource_counts[old_resource_on_ground] == 0:
+                del self.world_ref.map_generator.resource_counts[old_resource_on_ground]
+
+        # 2. Update map data to the new dropped item tile
+        self.world_ref.map_data[tile_y, tile_x] = new_tile_to_place
+        
+        # 3. Increment counts for the new tile and its resource
+        self.world_ref.map_generator.biome_counts[new_tile_to_place] = self.world_ref.map_generator.biome_counts.get(new_tile_to_place, 0) + 1
+        new_resource_from_dropped_item = new_tile_to_place.metadata.resource_type
+        if new_resource_from_dropped_item != ResourceType.NONE:
+            self.world_ref.map_generator.resource_counts[new_resource_from_dropped_item] = self.world_ref.map_generator.resource_counts.get(new_resource_from_dropped_item, 0) + 1
+            
+        self.world_ref.map_visuals_dirty = True
+
+        print(f"Zorp {self.id} dropped {carried_resource_type.name} at ({tile_x},{tile_y}). Tile changed to {new_tile_to_place.name}.")
+        
+        self.inventory.carrying = None
+        self.inventory.amount = 0
+        self.current_action = None # Reset action after successful drop
+        return True
+
+    def find_nearest_food_direction(self, world: 'ZorpWorld') -> Optional[Tuple[int, int]]:
+        """Scans nearby tiles for preferred food, returns direction to the nearest one, AND updates food memory.
 
         Args:
             world: The ZorpWorld instance.
-            allow_log: Boolean flag to enable/disable logging for this tick.
 
         Returns:
-            An ActionChoice (EAT, MOVE, or REST).
+            Optional[Tuple[int, int]]: (dx, dy) direction to the nearest food, or None if no food is found.
         """
-        if allow_log:
-            print(f"[Zorp {self.id} seek_food] Called. Position: {self.position}, Energy: {self.energy:.1f}")
-        # 1. Check current tile for food
-        current_resources = world.get_resources_at(self.position)
-        if allow_log:
-            print(f"[Zorp {self.id} seek_food] Resources at current pos {self.position}: {current_resources}")
-        if current_resources[0] > 0: # Index 0 is food_metric (energy value)
-            if allow_log:
-                print(f"[Zorp {self.id} seek_food] Food on current tile. Choosing EAT.")
-            return ActionChoice(action_type=ActionType.EAT)
+        if world.map_data is None or not self.alive:
+            return None
 
-        # 2. Scan a 5x5 area (radius 2) for food if not eating on current tile
-        if allow_log:
-            print(f"[Zorp {self.id} seek_food] No food on current tile. Scanning 5x5 area.")
+        perception_radius = int(self.genome.get("perception_radius", 5)) # Default to 5 if not in genome
+        preferred_foods = self.genome.get("preferred_food_types", [])
+        current_x, current_y = self.position
+
+        min_dist_sq = float('inf')
+        best_target_pos: Optional[Tuple[int, int]] = None
         
-        found_food_sources: List[Tuple[Tuple[Tuple[int, int], Tuple[int, int]], int]] = [] # List of ((food_pos, food_offset_from_zorp), distance_squared)
+        height, width = world.map_data.shape
+        for r_offset in range(-perception_radius, perception_radius + 1):
+            for c_offset in range(-perception_radius, perception_radius + 1):
+                if r_offset == 0 and c_offset == 0:
+                    continue # Skip current tile
 
-        for r_offset in range(1, 3): # Radius 1 and 2
-            for dx_offset in range(-r_offset, r_offset + 1):
-                for dy_offset in range(-r_offset, r_offset + 1):
-                    # Only check the perimeter of the current radius for distinct distance rings,
-                    # or simply iterate all cells in 5x5 excluding center.
-                    # For simplicity and ensuring all cells are checked once if not on perimeter definition:
-                    if dx_offset == 0 and dy_offset == 0: # Already checked current tile
-                        continue
-                    
-                    # Check only cells within the 2-tile radius boundary for 5x5 scan
-                    if abs(dx_offset) > 2 or abs(dy_offset) > 2:
-                        continue
+                check_x, check_y = current_x + c_offset, current_y + r_offset
 
-                    check_pos = (self.position[0] + dx_offset, self.position[1] + dy_offset)
-                    
-                    if not world.is_within_bounds(check_pos):
-                        continue
+                if not (0 <= check_x < width and 0 <= check_y < height):
+                    continue # Out of bounds
 
-                    resources_at_check_pos = world.get_resources_at(check_pos)
-                    # print(f"[Zorp {self.id} seek_food] Scanning {check_pos}: Resources={resources_at_check_pos}")
-
-                    if resources_at_check_pos[0] > 0: # Food found
-                        distance_sq = dx_offset**2 + dy_offset**2 # Use squared distance to avoid sqrt, for ranking
-                        found_food_sources.append(((check_pos, (dx_offset, dy_offset)), distance_sq))
-        
-        if not found_food_sources:
-            # 3. If no food in 5x5 area, perform a small random walk or REST
-            if allow_log:
-                print(f"[Zorp {self.id} seek_food] No food found in 5x5 area. Resorting to random move/rest.")
-            rand_dx = np.random.randint(-1, 2)
-            rand_dy = np.random.randint(-1, 2)
-            
-            if rand_dx == 0 and rand_dy == 0:
-                return ActionChoice(action_type=ActionType.REST)
-
-            next_pos_candidate = (self.position[0] + rand_dx, self.position[1] + rand_dy)
-            if world.is_tile_passable_for_zorp(next_pos_candidate):
-                return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx, rand_dy))
-            else:
-                return ActionChoice(action_type=ActionType.REST)
-
-        # Sort food sources by distance (ascending)
-        found_food_sources.sort(key=lambda item: item[1])
-        
-        min_dist_sq = found_food_sources[0][1]
-        closest_food_items = [item for item in found_food_sources if item[1] == min_dist_sq]
-        
-        # Randomly select one from the closest food items
-        selected_food_item_tuple = random.choice(closest_food_items)
-        target_food_pos, (target_dx_offset, target_dy_offset) = selected_food_item_tuple[0]
-
-        if allow_log:
-            print(f"[Zorp {self.id} seek_food] Closest food at {target_food_pos} (offset: ({target_dx_offset},{target_dy_offset})). Attempting to move.")
-
-        # Now, try to move towards the selected target_food_pos
-        passable = world.is_tile_passable_for_zorp(target_food_pos)
-        if passable:
-            direct_step_dx = np.sign(target_dx_offset).astype(int)
-            direct_step_dy = np.sign(target_dy_offset).astype(int)
-            
-            target_one_step_pos = (self.position[0] + direct_step_dx, self.position[1] + direct_step_dy)
-
-            if world.is_tile_passable_for_zorp(target_one_step_pos):
-                if allow_log:
-                    print(f"[Zorp {self.id} seek_food] Choosing direct MOVE via ({direct_step_dx},{direct_step_dy}) towards {target_food_pos}.")
-                return ActionChoice(action_type=ActionType.MOVE, move_delta=(direct_step_dx, direct_step_dy))
-            else:
-                if allow_log:
-                    print(f"[Zorp {self.id} seek_food] Direct first step {target_one_step_pos} to {target_food_pos} blocked. Trying alternatives.")
-                # Try alternative first steps that reduce Manhattan distance
-                current_dist_x_to_target = abs(target_dx_offset)
-                current_dist_y_to_target = abs(target_dy_offset)
+                tile_enum: Tile = world.map_data[check_y, check_x] # map_data is (row, col) which is (y, x)
+                tile_resource_type = tile_enum.metadata.resource_type
                 
-                possible_first_steps = [
-                    (sdx, sdy) for sdx in [-1, 0, 1] for sdy in [-1, 0, 1] 
-                    if not (sdx == 0 and sdy == 0)
-                ]
-                random.shuffle(possible_first_steps)
+                # Update memory if this is a preferred food type
+                if tile_resource_type in preferred_foods:
+                    if (check_x, check_y) not in self.known_food_locations:
+                        self.known_food_locations.add((check_x, check_y))
+                        print(f"[MEMORY ADD] Zorp {self.id} saw {tile_resource_type.name} at ({check_x},{check_y}). Memory size: {len(self.known_food_locations)}")
 
-                for alt_dx, alt_dy in possible_first_steps:
-                    alt_step_pos = (self.position[0] + alt_dx, self.position[1] + alt_dy)
-                    if world.is_tile_passable_for_zorp(alt_step_pos):
-                        # Calculate new Manhattan distance to the chosen target_food_pos if this alternative step is taken
-                        new_food_pos_relative_to_alt_step = (target_food_pos[0] - alt_step_pos[0], target_food_pos[1] - alt_step_pos[1])
-                        new_dist_to_food = abs(new_food_pos_relative_to_alt_step[0]) + abs(new_food_pos_relative_to_alt_step[1])
-                        original_dist_to_food = current_dist_x_to_target + current_dist_y_to_target # Manhattan dist to target
 
-                        if new_dist_to_food < original_dist_to_food:
-                            if allow_log:
-                                print(f"[Zorp {self.id} seek_food] Found alternative step ({alt_dx},{alt_dy}) towards food at {target_food_pos}.")
-                            return ActionChoice(action_type=ActionType.MOVE, move_delta=(alt_dx, alt_dy))
-                
-                if allow_log:
-                    print(f"[Zorp {self.id} seek_food] No better alternative first step found for food at {target_food_pos}. Opting for random valid move or REST.")
-                # Fallback if no alternative helps: random valid move or rest
-                rand_dx_fallback = np.random.randint(-1, 2)
-                rand_dy_fallback = np.random.randint(-1, 2)
-                if rand_dx_fallback == 0 and rand_dy_fallback == 0:
-                    return ActionChoice(action_type=ActionType.REST)
-                
-                next_pos_candidate_fallback = (self.position[0] + rand_dx_fallback, self.position[1] + rand_dy_fallback)
-                if world.is_tile_passable_for_zorp(next_pos_candidate_fallback):
-                    return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx_fallback, rand_dy_fallback))
-                else:
-                    return ActionChoice(action_type=ActionType.REST)
+                # Check if this tile contains preferred food for immediate action
+                if tile_resource_type in preferred_foods:
+                    # Check actual energy on tile to ensure it's not depleted
+                    # world.resource_energy_map is a numpy array, use array indexing
+                    energy_on_tile = world.resource_energy_map[check_y, check_x]
 
-        else: # Food is on an impassable tile
-            if allow_log:
-                print(f"[Zorp {self.id} seek_food] Selected closest food at {target_food_pos} is on an impassable tile. Opting for random valid move or REST.")
-            # Fallback: random valid move or rest
-            rand_dx_fallback = np.random.randint(-1, 2)
-            rand_dy_fallback = np.random.randint(-1, 2)
-            if rand_dx_fallback == 0 and rand_dy_fallback == 0:
-                return ActionChoice(action_type=ActionType.REST)
+                    if energy_on_tile > 0: # Only consider it if there's actual energy
+                        dist_sq = c_offset**2 + r_offset**2
+                        if dist_sq < min_dist_sq:
+                            min_dist_sq = dist_sq
+                            best_target_pos = (check_x, check_y)
+        
+        if best_target_pos:
+            # Calculate direction vector (dx, dy)
+            # Normalize (approximately) to unit steps if not already
+            dx = np.sign(best_target_pos[0] - current_x)
+            dy = np.sign(best_target_pos[1] - current_y)
+            return int(dx), int(dy) # Ensure integer deltas
+        
+        return None
+
+    def get_direction_to_nearest_known_food(self, world: 'ZorpWorld') -> Optional[Tuple[int, int]]:
+        """Checks memory for the nearest valid food source and returns direction.
+        Removes invalid/depleted food locations from memory.
+
+        Args:
+            world: The ZorpWorld instance.
+
+        Returns:
+            Optional[Tuple[int, int]]: (dx, dy) direction to the nearest known food, or None.
+        """
+        if not self.alive or not self.known_food_locations or world.map_data is None:
+            return None
+
+        preferred_foods = self.genome.get("preferred_food_types", [])
+        current_x, current_y = self.position
+        
+        min_dist_sq = float('inf')
+        best_target_pos: Optional[Tuple[int, int]] = None
+        locations_to_remove: Set[Tuple[int, int]] = set()
+
+        for food_x, food_y in list(self.known_food_locations): # Iterate over a copy for safe removal
+            # Validate food location is still valid and has food
+            if not (0 <= food_x < world.map_data.shape[1] and 0 <= food_y < world.map_data.shape[0]):
+                locations_to_remove.add((food_x, food_y))
+                continue
+
+            tile_enum: Tile = world.map_data[food_y, food_x]
+            tile_resource_type = tile_enum.metadata.resource_type
+            energy_on_tile = world.resource_energy_map[food_y, food_x]
+
+            if tile_resource_type not in preferred_foods or energy_on_tile <= 0:
+                # print(f"[MEMORY REMOVE] Zorp {self.id} removing ({food_x},{food_y}) - {tile_resource_type.name if tile_resource_type else 'N/A'} E:{energy_on_tile:.1f}. Memory size: {len(self.known_food_locations)-1}")
+                locations_to_remove.add((food_x, food_y))
+                continue
+
+            dist_sq = (food_x - current_x)**2 + (food_y - current_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                best_target_pos = (food_x, food_y)
+
+        for loc in locations_to_remove:
+            if loc in self.known_food_locations:
+                self.known_food_locations.remove(loc)
+                print(f"[MEMORY REMOVE] Zorp {self.id} removed depleted/invalid food at {loc}. Memory size: {len(self.known_food_locations)}")
+        
+        if best_target_pos:
+            dx = np.sign(best_target_pos[0] - current_x)
+            dy = np.sign(best_target_pos[1] - current_y)
+            return int(dx), int(dy)
             
-            next_pos_candidate_fallback = (self.position[0] + rand_dx_fallback, self.position[1] + rand_dy_fallback)
-            if world.is_tile_passable_for_zorp(next_pos_candidate_fallback):
-                return ActionChoice(action_type=ActionType.MOVE, move_delta=(rand_dx_fallback, rand_dy_fallback))
-            else:
-                return ActionChoice(action_type=ActionType.REST)
-
-    def __repr__(self) -> str:
-        return f"Zorp(id={self.id}, pos={self.position}, energy={self.energy:.1f}, age={self.age}, alive={self.alive})"
-
-# Example usage (for testing, not part of the class itself)
-if __name__ == '__main__':
-    # This part would require a mock ZorpWorld or be part of a larger test setup
-    class MockZorpWorld:
-        pass # Add methods if perceive() needs them for a standalone test
-
-    world_instance = MockZorpWorld()
-
-    # Create a Zorp with a default random genome
-    zorp = Zorp(position=(5, 5))
-    print(f"Created Zorp: {zorp}")
-    print(f"Zorp genome: {zorp.genome['weights'][0].shape}, {zorp.genome['biases'][0].shape}, ...")
-
-    # Simulate perception and thinking
-    try:
-        action_choice = zorp.think(world_instance, True)
-        print(f"Zorp chose action: {action_choice}")
-        if action_choice.action_type == ActionType.MOVE:
-            print(f"Move details: {action_choice.move_delta}")
-        elif action_choice.action_type == ActionType.EMIT_SIGNAL:
-            print(f"Signal details: {action_choice.signal_vector}")
-    except Exception as e:
-        print(f"Error during think: {e}")
-
-    zorp.update(world_instance)
-    print(f"Zorp after update: {zorp}") 
+        return None

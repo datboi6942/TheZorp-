@@ -1,6 +1,7 @@
 import numpy as np
 from enum import Enum, auto
 from typing import NamedTuple, Optional, Tuple, List, Dict, Any
+import uuid
 
 class ActionType(Enum):
     """Enumeration of possible actions a Zorp can take."""
@@ -9,6 +10,7 @@ class ActionType(Enum):
     REPRODUCE = auto()
     EMIT_SIGNAL = auto()
     REST = auto()
+    PICK_UP = auto()
 
 class ActionChoice(NamedTuple):
     """
@@ -18,10 +20,12 @@ class ActionChoice(NamedTuple):
         action_type: The type of action chosen.
         move_delta: Tuple (dx, dy) if action_type is MOVE.
         signal_vector: Numpy array of floats if action_type is EMIT_SIGNAL.
+        partner_id: UUID of the partner Zorp if action_type is REPRODUCE (sexual reproduction).
     """
     action_type: ActionType
     move_delta: Optional[Tuple[int, int]] = None
     signal_vector: Optional[np.ndarray] = None
+    partner_id: Optional[uuid.UUID] = None
 
 class ZorpBrain:
     """

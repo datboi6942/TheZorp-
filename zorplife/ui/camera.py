@@ -46,10 +46,9 @@ class Camera:
             dy: Change in y-direction (e.g., -1 for down, 1 for up).
             dt: Delta time since the last frame, for frame-rate independent speed.
         """
-        effective_speed = self.pan_speed
-        self.x += dx * effective_speed * dt
-        self.y += dy * effective_speed * dt
-        print(f"Camera Panned to: ({self.x:.2f}, {self.y:.2f}), Zoom: {self.zoom:.2f}, DeltaTime: {dt:.4f}")
+        self.x += dx * self.pan_speed / self.zoom * dt
+        self.y += dy * self.pan_speed / self.zoom * dt
+        # print(f"Camera Panned to: ({self.x:.2f}, {self.y:.2f}), Zoom: {self.zoom:.2f}, DeltaTime: {dt:.4f}")
 
     def zoom_in(self) -> None:
         """Zooms in to the next level if available."""
@@ -119,3 +118,16 @@ class Camera:
         world_x = (view_x / self.zoom) + self.x
         world_y = (view_y / self.zoom) + self.y
         return world_x, world_y 
+
+    def on_mouse_scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        """Handles mouse scroll events for zooming or other camera actions.
+
+        Args:
+            x: Mouse x position.
+            y: Mouse y position.
+            scroll_x: Amount scrolled horizontally.
+            scroll_y: Amount scrolled vertically.
+        """
+        pass
+
+    # ... existing code ... 

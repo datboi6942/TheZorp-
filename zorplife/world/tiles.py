@@ -51,8 +51,8 @@ class Tile(Enum):
     Each enum member holds TileMetadata.
     """
     # Biome/Terrain Tiles
-    GRASSLAND = TileMetadata(name="Grassland", char=".", base_color=(100, 200, 50, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=8.0)
-    FOREST_FLOOR = TileMetadata(name="Forest Floor", char=":", base_color=(50, 150, 20, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=5.0)
+    GRASSLAND = TileMetadata(name="Grassland", char=".", base_color=(100, 200, 50, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=20.0)
+    FOREST_FLOOR = TileMetadata(name="Forest Floor", char=":", base_color=(50, 150, 20, 255), resource_type=ResourceType.PLANT_MATTER, energy_value=20.0)
     WATER_SHALLOW = TileMetadata(name="Shallow Water", char="~", base_color=(50, 100, 200, 150), passable=False, resource_type=ResourceType.WATER)
     WATER_DEEP = TileMetadata(name="Deep Water", char="≈", base_color=(30, 70, 180, 255), passable=False, resource_type=ResourceType.WATER)
     CLIFF_ROCK = TileMetadata(name="Cliff Rock", char="#", base_color=(100, 100, 100, 255), passable=False, resource_type=ResourceType.STONE)
@@ -91,7 +91,7 @@ class Tile(Enum):
         passable=True, resource_type=ResourceType.MUSHROOMS,
         spot_color=(255, 255, 255, 255), # White spots
         spot_count=3, spot_size_ratio=0.15, # Spots represent mushroom caps
-        energy_value=7.0 # Added energy_value
+        energy_value=30.0 # Increased energy_value
     )
 
     # Special / Agent-related

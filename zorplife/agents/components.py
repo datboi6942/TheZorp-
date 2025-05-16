@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
 import uuid
+from ..world.tiles import ResourceType
 
 @dataclass
 class Position:
@@ -22,10 +24,21 @@ class Age:
 @dataclass
 class Genetics:
     """Represents the genetic makeup of an agent."""
-    genetic_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    genetic_id: uuid.UUID = field(default_factory=uuid.uuid4)
     # Potential future fields: color, size, metabolic_rate_modifier, etc.
 
 @dataclass
 class AgentMarker:
     """A marker component to identify Zorp entities."""
-    pass 
+    pass
+
+@dataclass
+class Inventory:
+    """Represents an agent's inventory.
+
+    Attributes:
+        carrying: The type of resource the agent is currently carrying, if any.
+        amount: The quantity of the resource being carried.
+    """
+    carrying: Optional[ResourceType] = None
+    amount: int = 0 

@@ -6,7 +6,7 @@ class GameConfig:
     map_width: int = 100
     map_height: int = 100
     tile_render_size: int = 32
-    initial_zorp_population: int = 10
+    initial_zorp_population: int = 100
     map_seed: int = 42
 
     window_width: int = 1024

@@ -5,7 +5,7 @@ import random # For spawning Zorps
 from typing import List, Tuple, Type, Optional
 import numpy as np
 
-from zorplife.core.systems import System, RenderSystem, InputSystem #, MetabolismSystem, ReproductionSystem # Agent Systems
+from zorplife.core.systems import System, RenderSystem, InputSystem, ForagingSystem # Added ForagingSystem
 # from zorplife.agents.components import Position, Energy, Age, Genetics, AgentMarker # Agent Components
 from zorplife.ui.camera import Camera # Import Camera
 from zorplife.world.mapgen import MapGenerator # Import MapGenerator
@@ -46,6 +46,7 @@ class Engine:
         # Initialize systems to None, they will be created in initialize_systems
         self.render_system: Optional[RenderSystem] = None
         self.input_system: Optional[InputSystem] = None
+        self.foraging_system: Optional[ForagingSystem] = None # Added foraging_system attribute
         # self.metabolism_system: Optional[MetabolismSystem] = None # To be phased out for Zorp class logic
         # self.reproduction_system: Optional[ReproductionSystem] = None # To be phased out for Zorp class logic
 
@@ -140,7 +141,7 @@ class Engine:
 
     def update(self, dt: float) -> None:
         # Calculate actual delta time, considering game speed
-        # actual_dt = dt * self.game_speed_multiplier # Apply game speed multiplier if you have one
+        actual_dt = dt * self.game_speed_multiplier # Apply game speed multiplier if you have one
 
         if self.stop_requested:
             # print("Engine stop requested, exiting pyglet app.") # DEBUG
@@ -154,9 +155,20 @@ class Engine:
         if self.input_system:
             self.input_system.process(dt)
 
+        # Process ForagingSystem (after ZorpWorld.tick so Zorps have decided actions)
+        if self.foraging_system:
+            self.foraging_system.process(dt)
+
         # Call RenderSystem directly (not via esper)
-        if self.render_system:
-            self.render_system.process_main_render_loop(dt)
+        if self.render_system and not self.config.headless_mode:
+            self.render_system.process_main_render_loop(actual_dt)
+            # FPS calculation and display update (only if rendering)
+            self.time_since_last_fps_update += actual_dt
+            self.frame_count += 1
+            if self.time_since_last_fps_update > self.fps_update_interval: # Corrected variable name here
+                self.current_fps = self.frame_count / self.time_since_last_fps_update
+                self.render_system.update_fps_display(self.current_fps)
+                self.time_since_last_fps_update = 0.0
 
         # First debug print for systems
         if not self.first_process_call_done:
@@ -201,17 +213,6 @@ class Engine:
         # except Exception as e:
         #     print(f"[ERROR Engine.update] during post-process agent check: {e}")
 
-        # FPS calculation
-        self.frame_count += 1
-        self.time_since_last_fps_update += dt
-        if self.time_since_last_fps_update >= self.fps_update_interval:
-            self.current_fps = self.frame_count / self.time_since_last_fps_update
-            self.frame_count = 0
-            self.time_since_last_fps_update = 0
-            # print(f"FPS: {self.current_fps:.2f}") # DEBUG FPS
-            if self.render_system: # Update FPS display in RenderSystem
-                self.render_system.update_fps_display(self.current_fps)
-
         # Control game loop speed if not vsyncing or if target_fps is very high
         # This simple sleep is not ideal for precise timing but can prevent 100% CPU usage
         # if 1.0 / self.config.target_fps > dt:
@@ -231,12 +232,25 @@ class Engine:
             self.render_system._prepare_map_renderables() # Call to update renderables
 
         # Re-instantiate ZorpWorld with map_data
-        self.world = ZorpWorld(self.config, self.map_generator.tile_grid_np)
+        self.world = ZorpWorld(self.config, self.map_generator.tile_grid_np, map_generator=self.map_generator)
         if self.render_system:
             self.render_system.world_ref = self.world
 
+        # Initialize ForagingSystem here, after ZorpWorld is created
+        if self.world and self.map_generator: # Ensure world and map_generator are ready
+            self.foraging_system = ForagingSystem(
+                world_ref=self.world,
+                map_generator_ref=self.map_generator
+            )
+            # Link ForagingSystem to ZorpWorld
+            self.world._foraging_system = self.foraging_system # Assign to ZorpWorld
+            print(f"ForagingSystem initialized and linked to ZorpWorld.")
+        else:
+            print("Warning: ZorpWorld or MapGenerator not ready, ForagingSystem not initialized in initialize_world.")
+
         # Spawn initial Zorp population into ZorpWorld
         print(f"Spawning {self.config.initial_zorp_population} Zorps into ZorpWorld...")
+        zorps_added = 0
         for i in range(self.config.initial_zorp_population):
             # Find a walkable tile for spawning
             spawn_attempts = 0
@@ -251,16 +265,14 @@ class Engine:
             if spawn_attempts == max_spawn_attempts:
                 print(f"Warning: Could not find a walkable tile to spawn Zorp {i+1} after {max_spawn_attempts} attempts. Skipping this Zorp.")
                 continue
-            # Create Zorp instance with tile-based coordinates
-            new_zorp = Zorp(position=(tile_x, tile_y)) # Energy, genome, etc., use defaults from Zorp class
-            self.world.add_zorp(new_zorp)
-            # Debug: Print spawn info
-            tile_enum = self.map_generator.tile_grid_np[tile_y][tile_x]
-            resource_type = tile_enum.metadata.resource_type
-            energy_value = tile_enum.metadata.energy_value
-            passable = tile_enum.metadata.passable
-            print(f"DEBUG: Spawned Zorp {new_zorp.id} at {new_zorp.position} on tile {tile_enum.name} (Passable: {passable}, Resource: {resource_type.name}, EnergyVal: {energy_value:.1f}) with E: {new_zorp.energy:.1f} Alive: {new_zorp.alive}")
-        print(f"Successfully spawned {len(self.world.all_zorps)} Zorps into ZorpWorld.")
+            # Ensure Zorp is placed on a passable tile
+            if self.world.is_tile_passable_for_zorp((tile_x, tile_y)):
+                new_zorp = Zorp(position=(tile_x, tile_y), world_ref=self.world) # Energy, genome, etc., use defaults from Zorp class
+                self.world.add_zorp(new_zorp)
+                zorps_added += 1
+            else:
+                print(f"Warning: Zorp {i+1} at {tile_x},{tile_y} is not passable. Skipping this Zorp.")
+        print(f"Successfully spawned {zorps_added} Zorps into ZorpWorld.")
 
         # Count Zorps in ECS after spawning (This will be 0 for AgentMarker if we removed creation)
         # zorp_entities_after_spawn = list(esper.get_components(AgentMarker, Position, Energy, Age, Genetics))
@@ -276,6 +288,18 @@ class Engine:
         # elif self.config.initial_zorp_population > 0:
         # print(f"[DEBUG Engine.initialize_world] No Zorp entities with AgentMarker found in ECS after ZorpWorld spawning (expected).")
 
+        # Initialize ForagingSystem (conditionally if it depends on world_ref) - MOVED TO initialize_world
+        # if self.world and self.map_generator: # Ensure world and map_generator are ready
+        #     self.foraging_system = ForagingSystem(
+        #         world_ref=self.world,
+        #         map_generator_ref=self.map_generator,
+        #         tile_render_size=self.config.tile_render_size
+        #     )
+        #     print(f"ForagingSystem initialized.")
+        # else:
+        #     print("Warning: ZorpWorld or MapGenerator not ready, ForagingSystem not initialized.")
+        
+        # print("Systems initialized and added to Esper.") # DEBUG
 
     def run(self) -> None:
         print("Starting engine loop...")

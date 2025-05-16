@@ -6,9 +6,10 @@ import numpy as np # For type hint np.ndarray
 from zorplife.ui.camera import Camera # Import Camera
 from zorplife.ui.sprites import SpriteSheet # Import SpriteSheet
 from zorplife.world.tiles import Tile, ResourceType # For type hint & ORGANIC_MATTER
-from zorplife.agents.components import Position, Energy, Age, Genetics, AgentMarker # Agent components
+from zorplife.agents.components import Position, Energy, Age, Genetics, AgentMarker, Inventory # Agent components
 import random
 from pyglet import math # Import pyglet.math for Mat4 identity
+from zorplife.world.world import REGROW_TICKS
 
 # if TYPE_CHECKING:
 #     # No longer needed as esper.World object is not used.
@@ -16,7 +17,8 @@ from pyglet import math # Import pyglet.math for Mat4 identity
 
 if TYPE_CHECKING:
     from ..world.world import ZorpWorld # For type hinting world_ref
-    # from ..core.zorp import Zorp # Zorp type is available via ZorpWorld.all_zorps
+    from ..core.zorp import Zorp # For type hinting Zorp entities
+    from ..world.mapgen import MapGenerator # For type hinting map_generator
 
 class System(esper.Processor):
     """Base class for all systems in the ECS.
@@ -66,6 +68,9 @@ class InputSystem(System):
         if dx != 0.0 or dy != 0.0:
             # print(f"Panning initiated with dx: {dx}, dy: {dy}") # DEBUG - REMOVED
             self.camera.pan(dx, dy, dt)
+
+            # Debug print for camera state
+            # print(f"Camera Panned to: ({self.camera.offset_x:.2f}, {self.camera.offset_y:.2f}), Zoom: {self.camera.zoom:.2f}, DeltaTime: {dt:.4f}") # Commented out to reduce log spam
         # else: # DEBUG for when no keys are pressed - REMOVED
             # print("No pan movement detected (dx and dy are 0).") 
 
@@ -75,6 +80,9 @@ class InputSystem(System):
             self.camera.zoom_in()
         elif scroll_y < 0:
             self.camera.zoom_out()
+
+    def on_mouse_press(self, x: int, y: int, button: int, modifiers: int) -> None:
+        if not self.camera: return
 
 class MetabolismSystem(System):
     """Handles agent aging, energy consumption, and death."""
@@ -229,7 +237,8 @@ class ReproductionSystem(System):
                         Position(x=child_x, y=child_y),
                         Energy(hunger=100.0, sleepiness=0.0), # Born full and rested
                         Age(current_age=0.0, lifespan=random.uniform(80, 120)), # Lifespan can vary slightly
-                        child_genetics
+                        child_genetics,
+                        Inventory() # Add empty inventory to new Zorps
                     )
                     print(f"Zorps {parent1_data['ent']} and {parent2_data['ent']} reproduced! New Zorp: {child_entity} with ID {child_genetics.genetic_id}")
                     
@@ -252,9 +261,9 @@ class RenderSystem(System):
         self.window = window
         self.camera = camera
         self.batch = batch # Use the shared batch from Engine
-        self.tile_sprites: List[pyglet.shapes.ShapeBase] = [] # Store all tile sprites for potential clearing
-        self.zorp_visuals: Dict[str, pyglet.shapes.ShapeBase] = {}
-        self.map_data: Optional[List[List[Tile]]] = None # Will be set by the Engine after map generation
+        self.tile_visuals: Dict[Tuple[int, int], List[pyglet.shapes.ShapeBase]] = {} # Stores sprites per (c,r) coordinate
+        self.rendered_map_state: Optional[np.ndarray] = None # Stores the state of map_data as it was last rendered
+        self.zorp_visuals: Dict[str, pyglet.shapes.ShapeBase] = {} # Renamed from zorp_sprites
         self.tile_render_size = tile_render_size
         self.tile_group = pyglet.graphics.Group(order=0)  # For tiles (background)
         self.agent_group = pyglet.graphics.Group(order=1) # For agents (foreground)
@@ -267,133 +276,182 @@ class RenderSystem(System):
             x=10, y=self.window.height - 20, anchor_x='left', anchor_y='top',
             batch=None # Drawn separately, not part of the batch
         )
+        self.zorp_count_label = pyglet.text.Label( # New Zorp counter label
+            'Zorps: 0',
+            font_name='Arial', font_size=12,
+            x=10, y=self.window.height - 40, anchor_x='left', anchor_y='top', # Position below FPS
+            batch=None # Drawn separately
+        )
         self._prepare_map_renderables_call_count = 0 # DEBUG COUNTER
 
-    def _prepare_map_renderables(self) -> None:
-        self._prepare_map_renderables_call_count += 1 # DEBUG COUNTER
-        print(f"[DEBUG RenderSystem] _prepare_map_renderables call count: {self._prepare_map_renderables_call_count}") # DEBUG COUNTER
+    def _create_tile_sprites_at_coord(self, r: int, c: int, tile_enum: Tile) -> List[pyglet.shapes.ShapeBase]:
+        """Creates and returns all pyglet shapes for a single tile at given map coordinates (r, c)."""
+        created_sprites: List[pyglet.shapes.ShapeBase] = []
+        try:
+            meta = tile_enum.metadata
+            base_x = c * self.tile_render_size
+            base_y = r * self.tile_render_size
 
-        if self.map_data is None:
-            print("[RenderSystem] Map data not available for rendering.")
-            return
-        
-        # Clear existing tile sprites before redrawing
-        for sprite in self.tile_sprites:
-            sprite.delete()
-        self.tile_sprites.clear()
-        
-        print(f"[RenderSystem] Preparing map renderables. Tile size: {self.tile_render_size}")
-        rows, cols = self.map_data.shape
-        for r in range(rows):
-            for c in range(cols):
-                tile_enum = self.map_data[r, c]
-                try:
-                    meta = tile_enum.metadata
-                    # Define in WORLD coordinates
-                    base_x = c * self.tile_render_size 
-                    base_y = r * self.tile_render_size
+            square = pyglet.shapes.Rectangle(
+                x=base_x,
+                y=base_y,
+                width=self.tile_render_size,
+                height=self.tile_render_size,
+                color=meta.base_color[:3],
+                batch=self.batch,
+                group=self.tile_group
+            )
+            created_sprites.append(square)
 
-                    square = pyglet.shapes.Rectangle(
-                        x=base_x, 
-                        y=base_y,
-                        width=self.tile_render_size,
-                        height=self.tile_render_size,
-                        color=meta.base_color[:3],
+            if meta.spot_color and meta.spot_count > 0:
+                random.seed(hash((c, r, tile_enum.value))) # Deterministic spots
+                spot_world_size = self.tile_render_size * meta.spot_size_ratio
+                spot_world_size = max(1, min(spot_world_size, self.tile_render_size / 2))
+
+                for _ in range(meta.spot_count):
+                    margin = spot_world_size / 2
+                    spot_center_x_world = base_x + margin + random.uniform(0, self.tile_render_size - spot_world_size)
+                    spot_center_y_world = base_y + margin + random.uniform(0, self.tile_render_size - spot_world_size)
+
+                    spot_shape = pyglet.shapes.Circle(
+                        x=spot_center_x_world,
+                        y=spot_center_y_world,
+                        radius=spot_world_size / 2,
+                        color=meta.spot_color[:3],
                         batch=self.batch,
                         group=self.tile_group
                     )
-                    self.tile_sprites.append(square)
+                    created_sprites.append(spot_shape)
+        except Exception as e:
+            print(f"Error creating sprite for tile {tile_enum} at map ({r},{c}) world ({base_x},{base_y}): {e}")
+        return created_sprites
 
-                    if meta.spot_color and meta.spot_count > 0:
-                        # Seed for deterministic spot placement for THIS tile.
-                        # Using a tuple of coordinates and tile type ensures that if the tile type changes,
-                        # the spots will also change, which is desirable.
-                        random.seed(hash((c, r, tile_enum.value)))
+    def _prepare_map_renderables(self) -> None: # Initial full map draw
+        self._prepare_map_renderables_call_count += 1
+        print(f"[DEBUG RenderSystem] _prepare_map_renderables (FULL DRAW) call count: {self._prepare_map_renderables_call_count}")
 
-                        spot_world_size = self.tile_render_size * meta.spot_size_ratio
-                        spot_world_size = max(1, min(spot_world_size, self.tile_render_size / 2))
-                        
-                        for _ in range(meta.spot_count):
-                            margin = spot_world_size / 2 # World space margin
-                            spot_center_x_world = base_x + margin + random.uniform(0, self.tile_render_size - spot_world_size)
-                            spot_center_y_world = base_y + margin + random.uniform(0, self.tile_render_size - spot_world_size)
-                            
-                            spot_shape = pyglet.shapes.Circle(
-                                x=spot_center_x_world, # WORLD coordinates for center
-                                y=spot_center_y_world,
-                                radius=spot_world_size / 2, # WORLD radius
-                                color=meta.spot_color[:3],
-                                batch=self.batch,
-                                group=self.tile_group
-                            )
-                            self.tile_sprites.append(spot_shape)
-                except Exception as e:
-                    print(f"Error preparing sprite for tile {tile_enum} at ({r},{c}): {e}")
-        print(f"Map renderables prepared. {len(self.tile_sprites)} tile sprites created.")
+        if not self.world_ref or self.world_ref.map_data is None:
+            print("[RenderSystem _prepare_map_renderables] World reference or map data not available.")
+            return
 
-    def _get_zorp_color(self, energy: float, max_energy: float = 100.0) -> Tuple[int, int, int]:
-        energy_ratio = max(0, min(1, energy / max_energy))
-        if energy_ratio > 0.7:
-            return (int(100 * (1 - energy_ratio) * 2.5), 200, int(50 * (1 - energy_ratio) * 2.5))
-        elif energy_ratio > 0.3:
-            return (255, int(150 + 105 * (energy_ratio - 0.3) / 0.4), 0)
-        else:
-            return (255, int(100 * energy_ratio / 0.3), 0)
+        # Clear any existing visuals (e.g., if called again after a reset)
+        for coord_sprites in self.tile_visuals.values():
+            for sprite in coord_sprites:
+                sprite.delete()
+        self.tile_visuals.clear()
+        
+        print(f"[RenderSystem _prepare_map_renderables] Preparing initial map renderables. Tile size: {self.tile_render_size}")
+        current_map_data = self.world_ref.map_data
+        rows, cols = current_map_data.shape
+        
+        total_sprites_created = 0
+        for r_idx in range(rows): # Renamed r to r_idx
+            for c_idx in range(cols): # Renamed c to c_idx
+                tile_enum = current_map_data[r_idx, c_idx]
+                new_sprites = self._create_tile_sprites_at_coord(r_idx, c_idx, tile_enum)
+                self.tile_visuals[(c_idx, r_idx)] = new_sprites
+                total_sprites_created += len(new_sprites)
+        
+        self.rendered_map_state = np.copy(current_map_data) # Store a copy of the rendered state
+        print(f"Initial map renderables prepared. {total_sprites_created} tile sprites created for {rows*cols} tiles.")
+
+    def _update_dirty_map_renderables(self) -> None: # Partial map update based on diff
+        print(f"[DEBUG RenderSystem] _update_dirty_map_renderables called.")
+        if not self.world_ref or self.world_ref.map_data is None or self.rendered_map_state is None:
+            print("[RenderSystem _update_dirty_map_renderables] World ref, map data, or rendered state missing.")
+            return
+
+        current_map_data = self.world_ref.map_data
+        rows, cols = current_map_data.shape
+        changed_tiles_count = 0
+        
+        for r_idx in range(rows): # Renamed r to r_idx
+            for c_idx in range(cols): # Renamed c to c_idx
+                current_tile_enum = current_map_data[r_idx, c_idx]
+                rendered_tile_enum = self.rendered_map_state[r_idx, c_idx]
+
+                if current_tile_enum != rendered_tile_enum:
+                    changed_tiles_count +=1
+                    # Delete old sprites for this coordinate
+                    if (c_idx, r_idx) in self.tile_visuals:
+                        for old_sprite in self.tile_visuals[(c_idx, r_idx)]:
+                            old_sprite.delete()
+                        self.tile_visuals[(c_idx, r_idx)].clear()
+                    
+                    # Create and store new sprites
+                    new_sprites = self._create_tile_sprites_at_coord(r_idx, c_idx, current_tile_enum)
+                    self.tile_visuals[(c_idx, r_idx)] = new_sprites
+                    
+                    # Update the rendered state for this tile
+                    self.rendered_map_state[r_idx, c_idx] = current_tile_enum
+        
+        if changed_tiles_count > 0:
+            print(f"[RenderSystem _update_dirty_map_renderables] Updated {changed_tiles_count} changed tiles.")
+        
+        self.world_ref.map_visuals_dirty = False # Reset the flag
 
     def process_main_render_loop(self, dt: float) -> None:
         self.window.clear()
-
-        # Set the window's view transform for the world batch
         self.window.view = self.camera.get_view_matrix()
 
-        # Check if map visuals need updating
-        if self.world_ref and self.world_ref.map_visuals_dirty:
-            print("[RenderSystem] map_visuals_dirty is True. Re-preparing map renderables.")
-            self._prepare_map_renderables()
-            self.world_ref.map_visuals_dirty = False # Reset the flag
+        if self.rendered_map_state is None: # First-time map draw
+            if self.world_ref and self.world_ref.map_data is not None:
+                print("[RenderSystem process_main_render_loop] Initial map draw.")
+                self._prepare_map_renderables()
+            else:
+                print("[RenderSystem process_main_render_loop] Waiting for world_ref and map_data for initial draw.")
+        elif self.world_ref and self.world_ref.map_visuals_dirty:
+            print("[RenderSystem process_main_render_loop] map_visuals_dirty is True. Updating dirty map renderables.")
+            self._update_dirty_map_renderables()
+        # Check if map visuals need updating - OLD LOGIC REMOVED
+        # if self.world_ref and self.world_ref.map_visuals_dirty:
+        #     print("[RenderSystem] map_visuals_dirty is True. Re-preparing map renderables.")
+        #     self._prepare_map_renderables() # This was the full redraw
+        #     self.world_ref.map_visuals_dirty = False # Reset the flag
 
         current_zorp_ids_in_world = set()
         for zorp in self.world_ref.all_zorps:
-            current_zorp_ids_in_world.add(zorp.id)
+            zorp_id_str = str(zorp.id)
+            current_zorp_ids_in_world.add(zorp_id_str)
             if not zorp.alive:
-                if zorp.id in self.zorp_visuals:
-                    self.zorp_visuals[zorp.id].delete()
-                    del self.zorp_visuals[zorp.id]
-                    if zorp.id + '_debug' in self.zorp_visuals:
-                        self.zorp_visuals[zorp.id + '_debug'].delete()
-                        del self.zorp_visuals[zorp.id + '_debug']
+                if zorp_id_str in self.zorp_visuals:
+                    self.zorp_visuals[zorp_id_str].delete()
+                    del self.zorp_visuals[zorp_id_str]
+                    if zorp_id_str + '_debug' in self.zorp_visuals:
+                        self.zorp_visuals[zorp_id_str + '_debug'].delete()
+                        del self.zorp_visuals[zorp_id_str + '_debug']
                 continue
 
-            # Zorp positions and sizes are in WORLD coordinates
             tile_x, tile_y = zorp.position
             world_x_center = tile_x * self.tile_render_size + self.tile_render_size / 2.0
             world_y_center = tile_y * self.tile_render_size + self.tile_render_size / 2.0
             world_radius = self.tile_render_size / 3.0 
             color = self._get_zorp_color(zorp.energy, zorp.max_energy)
 
-            if zorp.id in self.zorp_visuals:
-                shape = self.zorp_visuals[zorp.id]
+            # DEBUG: Print Zorp and visual positions
+            # print(f"[RenderSystem] Zorp {zorp_id_str} at tile ({tile_x},{tile_y}) -> world ({world_x_center:.1f},{world_y_center:.1f})")
+
+            if zorp_id_str in self.zorp_visuals:
+                shape = self.zorp_visuals[zorp_id_str]
                 shape.x = world_x_center
                 shape.y = world_y_center
                 shape.radius = world_radius 
                 shape.color = color
                 shape.opacity = 255
-                # Debug shape also in world coordinates
-                if zorp.id + '_debug' in self.zorp_visuals:
-                    debug_shape = self.zorp_visuals[zorp.id + '_debug']
-                    debug_shape.x = world_x_center - self.tile_render_size / 4 # Offset from center
+                if zorp_id_str + '_debug' in self.zorp_visuals:
+                    debug_shape = self.zorp_visuals[zorp_id_str + '_debug']
+                    debug_shape.x = world_x_center - self.tile_render_size / 4
                     debug_shape.y = world_y_center - self.tile_render_size / 4
-                    # Assuming debug shape width/height are fixed in world units
                     debug_shape.width = self.tile_render_size / 2 
                     debug_shape.height = self.tile_render_size / 2
             else:
                 new_shape = pyglet.shapes.Circle(
-                    world_x_center, world_y_center, world_radius, # WORLD coordinates
+                    world_x_center, world_y_center, world_radius,
                     color=color,
                     batch=self.batch,
                     group=self.agent_group
                 )
-                self.zorp_visuals[zorp.id] = new_shape
+                self.zorp_visuals[zorp_id_str] = new_shape
                 # Optionally create debug rect in world coordinates if needed
                 # debug_rect = pyglet.shapes.Rectangle(
                 #     x = world_x_center - self.tile_render_size / 4, 
@@ -401,16 +459,21 @@ class RenderSystem(System):
                 #     width = self.tile_render_size / 2, 
                 #     height = self.tile_render_size / 2, 
                 #     color=(255,0,255), batch=self.batch, group=self.agent_group)
-                # self.zorp_visuals[zorp.id + '_debug'] = debug_rect
+                # self.zorp_visuals[zorp_id_str + '_debug'] = debug_rect
 
         zorp_ids_in_visuals = list(self.zorp_visuals.keys())
         for zorp_id_visual in zorp_ids_in_visuals:
+            if not isinstance(zorp_id_visual, str):
+                continue
             is_debug_visual = zorp_id_visual.endswith('_debug')
             actual_zorp_id = zorp_id_visual.replace('_debug', '')
             if actual_zorp_id not in current_zorp_ids_in_world:
                 if self.zorp_visuals[zorp_id_visual]:
                     self.zorp_visuals[zorp_id_visual].delete()
                     del self.zorp_visuals[zorp_id_visual]
+        
+        if self.world_ref: # Update zorp count
+            self.update_zorp_count_display(len(current_zorp_ids_in_world))
 
         self.batch.draw() # This draws everything affected by self.window.view
 
@@ -418,6 +481,8 @@ class RenderSystem(System):
         self.window.view = math.Mat4() # Identity matrix
         if self.fps_label: # Ensure fps_label is drawn after resetting the view
             self.fps_label.draw()
+        if self.zorp_count_label: # Ensure zorp_count_label is drawn
+            self.zorp_count_label.draw()
 
     def process(self, dt: float) -> None:
         self.process_main_render_loop(dt)
@@ -429,6 +494,169 @@ class RenderSystem(System):
             fps: The current frames per second value.
         """
         self.fps_label.text = f"FPS: {fps:.1f}"
+
+    def update_zorp_count_display(self, count: int) -> None:
+        """Update the Zorp count label text.
+
+        Args:
+            count: The current number of Zorps.
+        """
+        if self.zorp_count_label:
+            self.zorp_count_label.text = f"Zorps: {count}"
+
+    def _get_zorp_color(self, energy: 'Energy', max_energy: float) -> Tuple[int, int, int]:
+        """Calculates Zorp color based on energy. Healthy = green, Starving = red."""
+        if max_energy == 0: # Avoid division by zero
+            return (128, 128, 128) # Grey for undefined max_energy state
+        
+        # Correctly access the hunger attribute from the Energy object
+        energy_ratio = max(0, min(1, energy.hunger / max_energy))
+        
+        # Interpolate between red (low energy) and green (high energy)
+        red = int(255 * (1 - energy_ratio))
+        green = int(255 * energy_ratio)
+        blue = 0
+        return (red, green, blue)
+
+class ForagingSystem(System):
+    """Handles Zorp foraging behavior, including finding and consuming food."""
+
+    def __init__(self, world_ref: Optional['ZorpWorld'] = None, map_generator_ref: Optional['MapGenerator'] = None):
+        super().__init__()
+        self.world_ref = world_ref
+        self.map_generator_ref = map_generator_ref
+        self.zorp_inventories: Dict[str, Inventory] = {} # zorp_id (UUID string) -> Inventory
+
+    def add_new_zorp_inventory(self, zorp_id: str) -> None:
+        """Initializes an inventory for a newly created Zorp.
+
+        Args:
+            zorp_id: The unique identifier (UUID string) of the Zorp.
+        """
+        if zorp_id not in self.zorp_inventories:
+            self.zorp_inventories[zorp_id] = Inventory()
+            # print(f"[ForagingSystem DEBUG] Initialized inventory for new Zorp ID: {zorp_id}") # DEBUG
+        # else: # DEBUG
+            # print(f"[ForagingSystem WARNING] Zorp ID {zorp_id} already has an inventory. Not re-initializing.") # DEBUG
+
+    def process(self, dt: float) -> None:
+        # Check if essential references are set
+        if not self.world_ref or self.world_ref.map_data is None or not self.map_generator_ref:
+            # print("[ForagingSystem] World reference, map_data, or map_generator not available. Skipping process.")
+            return
+
+        # Iterate over all Zorps that are currently in the "foraging" state
+        for zorp in self.world_ref.all_zorps:
+            if not zorp.alive or zorp.current_action != "foraging":
+                continue
+
+            # Check if inventory is already full (or carrying something)
+            if zorp.inventory.carrying is not None and zorp.inventory.amount > 0:
+                # Already carrying something, shouldn't be in "foraging" state or should re-evaluate
+                # For now, we assume decide_action correctly sets foraging only if inventory is empty
+                # or we can clear action here if Zorp is full but still foraging.
+                # zorp.current_action = None # Or back to wandering
+                continue
+
+            tile_x, tile_y = zorp.position
+            
+            # Boundary check for tile coordinates
+            if not (0 <= tile_y < self.map_generator_ref.height and 0 <= tile_x < self.map_generator_ref.width):
+                print(f"[ForagingSystem] Zorp {zorp.id} at invalid position ({tile_x},{tile_y}). Skipping.")
+                continue
+            
+            tile_under_zorp = self.world_ref.map_data[tile_y, tile_x]
+            resource_on_tile = tile_under_zorp.metadata.resource_type
+            energy_from_tile = tile_under_zorp.metadata.energy_value # May not be directly used for pickup, but good to know
+
+            # Check if the resource is one the Zorp wants (or any food)
+            # For simplicity, let's assume Zorp attempts to pick up any recognized food resource.
+            # The Zorp's genome (`preferred_food_types`) is used when *eating* from inventory.
+            # Here, we check if the tile itself is a harvestable resource.
+            
+            # What tile does it become after harvesting? (e.g. FRUIT_BUSH -> GRASS)
+            # This needs a defined mapping or logic.
+            # For now, let's assume some common transitions:
+            # FRUIT_BUSH -> GRASS
+            # MUSHROOM_PATCH -> DIRT or GRASS
+            # ORGANIC_REMAINS -> DIRT or GRASS
+            # Other resources like IRON_DEPOSIT might not be "picked up" in the same way by Zorps for food.
+
+            harvestable_food_resources = {
+                ResourceType.APPLES: Tile.GRASSLAND, # Changed FRUIT to APPLES. When apples are picked from APPLE_TREE_LEAVES, the leaves tile might become just GRASSLAND, or perhaps APPLE_TREE_LEAVES with no apples (needs more logic for regrowth).
+                ResourceType.MUSHROOMS: Tile.FOREST_FLOOR,
+                ResourceType.ORGANIC_MATTER: Tile.FOREST_FLOOR # From ORGANIC_REMAINS tile
+            }
+
+            if resource_on_tile in harvestable_food_resources:
+                if zorp.inventory.carrying is None and zorp.inventory.amount == 0:
+                    # Pick up the resource
+                    zorp.inventory.carrying = resource_on_tile
+                    zorp.inventory.amount = 1 # Assume 1 unit picked up
+                    
+                    original_tile_enum = tile_under_zorp
+                    new_tile_enum: Tile
+                    regrow_ticks = REGROW_TICKS
+
+                    if resource_on_tile == ResourceType.APPLES:
+                        if original_tile_enum == Tile.APPLE_TREE_LEAVES: # Ensure we are picking from the correct tile
+                            self.world_ref.consumed_tile_original_type[(tile_x, tile_y)] = Tile.APPLE_TREE_LEAVES
+                            new_tile_enum = Tile.TREE_CANOPY
+                        else: # Zorp is on a tile that isn't APPLE_TREE_LEAVES but claims to have apples, skip
+                            zorp.inventory.carrying = None # Undo pickup
+                            zorp.inventory.amount = 0
+                            continue
+                    elif resource_on_tile == ResourceType.MUSHROOMS:
+                        if original_tile_enum == Tile.MUSHROOM_PATCH: # Ensure we are picking from the correct tile
+                            self.world_ref.consumed_tile_original_type[(tile_x, tile_y)] = Tile.MUSHROOM_PATCH
+                            new_tile_enum = Tile.FOREST_FLOOR
+                        else: # Zorp is on a tile that isn't MUSHROOM_PATCH but claims to have mushrooms, skip
+                            zorp.inventory.carrying = None # Undo pickup
+                            zorp.inventory.amount = 0
+                            continue
+                    elif resource_on_tile == ResourceType.ORGANIC_MATTER:
+                        # Assuming ORGANIC_MATTER comes from ORGANIC_REMAINS and regrows as FOREST_FLOOR
+                        # This might not need special consumed_tile_original_type handling if it doesn't revert to ORGANIC_REMAINS
+                        self.world_ref.consumed_tile_original_type[(tile_x, tile_y)] = Tile.ORGANIC_REMAINS # Or original_tile_enum
+                        new_tile_enum = Tile.FOREST_FLOOR # Or whatever ORGANIC_REMAINS should become when depleted
+                    else:
+                        # Should not happen if resource_on_tile is in harvestable_food_resources
+                        # but as a fallback, or if other resources are added:
+                        zorp.inventory.carrying = None # Undo pickup
+                        zorp.inventory.amount = 0
+                        continue
+
+                    # Update map data in ZorpWorld (which should handle map_generator's grid too, or do it consistently)
+                    self.world_ref.map_data[tile_y, tile_x] = new_tile_enum # Change tile in ZorpWorld's map_data
+                    # self.map_generator_ref.tile_grid_np[tile_y, tile_x] = new_tile_enum # This might be redundant if ZorpWorld.map_data is the source of truth
+
+                    # Deplete resource and set regrowth timer in ZorpWorld
+                    self.world_ref.resource_energy_map[tile_y, tile_x] = 0.0
+                    self.world_ref.resource_regrow_timer[tile_y, tile_x] = regrow_ticks
+                    
+                    self.world_ref.map_visuals_dirty = True
+
+                    # Update biome and resource counts (critical)
+                    # Decrement old tile/resource
+                    if original_tile_enum in self.map_generator_ref.biome_counts:
+                        self.map_generator_ref.biome_counts[original_tile_enum] -= 1
+                        if self.map_generator_ref.biome_counts[original_tile_enum] == 0:
+                            del self.map_generator_ref.biome_counts[original_tile_enum]
+                    
+                    if resource_on_tile != ResourceType.NONE and resource_on_tile in self.map_generator_ref.resource_counts:
+                        self.map_generator_ref.resource_counts[resource_on_tile] -= 1
+                        if self.map_generator_ref.resource_counts[resource_on_tile] == 0:
+                            del self.map_generator_ref.resource_counts[resource_on_tile]
+
+                    # Increment new tile/resource (new tile might have ResourceType.NONE)
+                    self.map_generator_ref.biome_counts[new_tile_enum] = self.map_generator_ref.biome_counts.get(new_tile_enum, 0) + 1
+                    new_resource_type = new_tile_enum.metadata.resource_type
+                    if new_resource_type != ResourceType.NONE:
+                         self.map_generator_ref.resource_counts[new_resource_type] = self.map_generator_ref.resource_counts.get(new_resource_type, 0) + 1
+
+                    zorp.current_action = None # Successfully foraged, reset action (will be decided next tick)
+                    print(f"[ForagingSystem] Zorp {zorp.id} picked up {resource_on_tile.name} from ({tile_x},{tile_y}). Tile changed to {new_tile_enum.name}. Inventory: {zorp.inventory.carrying.name}({zorp.inventory.amount})")
+                # else: Zorp already carrying something or inventory full, though decide_action should prevent this state.
 
 # --- Main Game Class (Example of how systems might be wired) --- #
 # This is a conceptual placeholder. Actual game class might be elsewhere.
